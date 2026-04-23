@@ -1,0 +1,19 @@
+{
+  "name": "imessage",
+  "description": "Local iMessage channel for Claude Code — reads chat.db directly and sends via AppleScript. Ships with built-in access control; manage pairing, allowlists, and policy via /imessage:access.",
+  "version": "0.3.0",
+  "author": {
+    "name": "Gabriel Chiappa"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/gabrielchiappa/imessage-claude-assistant",
+  "repository": "https://github.com/gabrielchiappa/imessage-claude-assistant.git",
+  "keywords": [
+    "imessage",
+    "messaging",
+    "channel",
+    "mcp",
+    "local",
+    "macos"
+  ]
+}

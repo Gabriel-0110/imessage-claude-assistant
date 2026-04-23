@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "gabriel-local-plugins",
+  "version": "1.0.0",
+  "description": "Local Claude Code marketplace hosting the iMessage channel plugin for development and self-hosted use.",
+  "owner": {
+    "name": "Gabriel Chiappa",
+    "email": "gabrielchiappa@outlook.com"
+  },
+  "plugins": [
+    {
+      "name": "imessage",
+      "description": "Local iMessage channel for Claude Code — reads chat.db, sends via AppleScript, with allowlist/pairing access control.",
+      "source": "./plugins/imessage",
+      "homepage": "https://github.com/gabrielchiappa/imessage-claude-assistant",
+      "keywords": ["imessage", "messaging", "channel", "macos"]
+    }
+  ]
+}
