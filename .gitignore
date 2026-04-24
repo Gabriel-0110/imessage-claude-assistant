@@ -2,3 +2,4 @@
 state/
 node_modules/
 *.log
+imessage-claude-assistant.code-workspace
