@@ -4,6 +4,20 @@
 
 ### Changed
 
+- SMS/RCS inbound gate now consults `preferences.allowSms` before
+  falling back to the `IMESSAGE_ALLOW_SMS` env default. Explicit
+  `allowSms: true` or `false` overrides the env value, so operators
+  can flip SMS acceptance without restarting the server. Default
+  remains iMessage-only (spoofable sender IDs).
+- Inbound notifications now honour `preferences.pauseUntil` (global)
+  and `preferences.pausedChats[chat_guid]` (per-thread). When either
+  timestamp is in the future, `handleInbound` silently drops the
+  notification — the message is still persisted by Messages.app and
+  available via `chat_messages` / `recent_chats`.
+- Inbound content is tagged with a `[nsfw]` prefix when
+  `preferences.nsfwFilter === 'tag'` and the text matches a
+  conservative keyword heuristic. Message is still delivered; the tag
+  is purely a warning banner for the drafting surface.
 - `handleInbound` now gates inbound-image exposure behind
   `preferences.visionEnabled`. When the operator has not opted in
   (default), the `image_path` attribute is stripped from the
@@ -39,6 +53,18 @@
 
 ### Added
 
+- `pause` MCP tool — suppress inbound channel notifications globally or
+  for a single `chat_guid` for a chosen number of minutes (default 60).
+  Messages still land in `chat.db` and are reachable through the read
+  tools; only the drafting surface is quieted. Auto-resumes at the
+  computed timestamp.
+- `resume` MCP tool — clear a `pause`, either globally (clears
+  `pauseUntil`) or for a specific `chat_guid` (clears that entry from
+  `pausedChats`).
+- `list_contacts` MCP tool — read-only audit of the access-control
+  state: DM policy, allowlisted handles, self-chat handles, and
+  configured groups with their `requireMention` / `allowFrom`
+  policies. Supports `format: "json"`.
 - Inbound vision gate controlled by `preferences.visionEnabled`
   (default `false`). When enabled, inbound image attachments are
   surfaced to Claude via `image_path` just as before; when disabled,

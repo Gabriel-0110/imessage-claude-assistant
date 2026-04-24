@@ -606,6 +606,10 @@ function readTextSafe(p: string): string | null {
 type Tone = 'neutral' | 'warm' | 'concise' | 'professional' | 'playful'
 const TONE_VALUES: readonly Tone[] = ['neutral', 'warm', 'concise', 'professional', 'playful']
 const NSFW_FILTER_VALUES = ['off', 'tag'] as const
+// Conservative keyword heuristic for the nsfwFilter: 'tag' path. Deliberately
+// small — the goal is a banner, not censorship. Inbound content matching any
+// of these gets a `[nsfw]` prefix in the channel notification. Case-insensitive.
+const NSFW_TRIGGERS = /\b(nude|nudes|naked|nsfw|porn|pornographic|erotic|explicit|horny|sext|sexting)\b/i
 const FOCUS_MODE_VALUES = ['off', 'pause'] as const
 
 type Preferences = {
@@ -620,6 +624,9 @@ type Preferences = {
   visionEnabled?: boolean                               // phase 3 (default false)
   nsfwFilter?: typeof NSFW_FILTER_VALUES[number]        // phase 4 (default 'off')
   focusMode?: typeof FOCUS_MODE_VALUES[number]          // phase 4 (default 'off')
+  allowSms?: boolean                                    // phase 4 — overrides IMESSAGE_ALLOW_SMS when set
+  pauseUntil?: string                                   // phase 4 — ISO timestamp, global pause on inbound notifications
+  pausedChats?: Record<string, string>                  // phase 4 — per-chat ISO pause timestamps
   denyFrom?: string[]                                   // phase 2
   memoryPath?: string                                   // phase 5
   schedulerEnabled?: boolean                            // phase 5 (default false)
@@ -633,7 +640,8 @@ const PREFERENCE_KEYS = [
   'defaultTone', 'signaturePerContact', 'notes',
   'customInstructions', 'customInstructionsPerContact',
   'styleLearningEnabled', 'visionEnabled',
-  'nsfwFilter', 'focusMode', 'denyFrom', 'memoryPath',
+  'nsfwFilter', 'focusMode', 'allowSms', 'pauseUntil', 'pausedChats',
+  'denyFrom', 'memoryPath',
   'schedulerEnabled', 'bridgeEnabled', 'bridgeToken',
 ] as const
 
@@ -675,9 +683,31 @@ function validatePreferencesPartial(input: unknown): Partial<Preferences> {
       case 'visionEnabled':
       case 'schedulerEnabled':
       case 'bridgeEnabled':
+      case 'allowSms':
         if (typeof v !== 'boolean') throw new Error(`${k} must be boolean`)
         out[k] = v
         break
+      case 'pauseUntil': {
+        if (typeof v !== 'string' || !v.trim()) throw new Error('pauseUntil must be an ISO-8601 string')
+        const t = Date.parse(v)
+        if (!Number.isFinite(t)) throw new Error('pauseUntil must parse as a date')
+        out[k] = new Date(t).toISOString()
+        break
+      }
+      case 'pausedChats': {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('pausedChats must be an object of chat_guid → ISO timestamp')
+        const obj = v as Record<string, unknown>
+        const norm: Record<string, string> = {}
+        for (const [ck, cv] of Object.entries(obj)) {
+          if (cv === null || cv === undefined) { norm[ck] = ''; continue }
+          if (typeof cv !== 'string' || !cv.trim()) throw new Error(`pausedChats["${ck}"] must be an ISO-8601 string`)
+          const t = Date.parse(cv)
+          if (!Number.isFinite(t)) throw new Error(`pausedChats["${ck}"] must parse as a date`)
+          norm[ck] = new Date(t).toISOString()
+        }
+        out[k] = norm
+        break
+      }
       case 'notes':
       case 'customInstructions':
         if (typeof v !== 'string') throw new Error(`${k} must be a string`)
@@ -744,13 +774,13 @@ function writePreferences(patch: Partial<Preferences>): Preferences {
     if (v === undefined) { delete next[k]; continue }
     const existing = cur[k]
     if (
-      (k === 'signaturePerContact' || k === 'customInstructionsPerContact') &&
+      (k === 'signaturePerContact' || k === 'customInstructionsPerContact' || k === 'pausedChats') &&
       existing && typeof existing === 'object' && !Array.isArray(existing) &&
       v && typeof v === 'object' && !Array.isArray(v)
     ) {
       const merged: Record<string, unknown> = { ...(existing as Record<string, unknown>) }
       for (const [ck, cv] of Object.entries(v as Record<string, unknown>)) {
-        if (cv === undefined || cv === null) delete merged[ck]
+        if (cv === undefined || cv === null || cv === '') delete merged[ck]
         else merged[ck] = cv
       }
       next[k] = merged
@@ -1168,6 +1198,35 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['chat_guid'],
       },
     },
+    {
+      name: 'pause',
+      description:
+        'Suppress inbound channel notifications for a window of time. Without chat_guid, pauses all inbound; with chat_guid, pauses just that thread. Messages still land in chat.db and are visible via chat_messages / recent_chats — only the drafting surface is quiet. Use when you want a conversation to continue naturally without auto-drafting. Auto-resumes at the computed timestamp.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          minutes: { type: 'number', description: 'Duration in minutes. Default 60.' },
+          chat_guid: { type: 'string', description: 'Optional — pause just this chat.' },
+        },
+      },
+    },
+    {
+      name: 'resume',
+      description:
+        'Clear a pause set by the pause tool. Without chat_guid, clears the global pauseUntil; with chat_guid, clears only that thread. Other pauses remain in effect.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_guid: { type: 'string', description: 'Optional — clear just this chat.' },
+        },
+      },
+    },
+    {
+      name: 'list_contacts',
+      description:
+        'List the access-control state in read-only form: allowlisted DM handles, configured groups (with their policies), self-chat handles, and the active DM policy. Useful for "who can currently reach me" audits and for populating UIs. Does not include message bodies.',
+      inputSchema: { type: 'object', properties: { format: { type: 'string', enum: ['text', 'json'] } } },
+    },
   ],
 }))
 
@@ -1538,6 +1597,62 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
         return { content: [{ type: 'text', text: JSON.stringify(ctx, null, 2) }] }
       }
+      case 'pause': {
+        const minutesRaw = args.minutes as number | undefined
+        const minutes = Number.isFinite(minutesRaw) && (minutesRaw as number) > 0 ? (minutesRaw as number) : 60
+        const until = new Date(Date.now() + minutes * 60_000).toISOString()
+        const chatGuid = typeof args.chat_guid === 'string' ? (args.chat_guid as string).trim() : ''
+        const patch: Partial<Preferences> = chatGuid
+          ? validatePreferencesPartial({ pausedChats: { [chatGuid]: until } })
+          : validatePreferencesPartial({ pauseUntil: until })
+        writePreferences(patch)
+        log('info', 'paused', { chat_guid: chatGuid || null, until, minutes })
+        const scope = chatGuid ? `chat ${chatGuid}` : 'all inbound'
+        return { content: [{ type: 'text', text: `paused ${scope} until ${until} (${minutes} min)` }] }
+      }
+      case 'resume': {
+        const chatGuid = typeof args.chat_guid === 'string' ? (args.chat_guid as string).trim() : ''
+        if (chatGuid) {
+          // Clear just this chat by passing an empty string, which the
+          // pausedChats merge path interprets as "delete key".
+          writePreferences({ pausedChats: { [chatGuid]: '' } as Record<string, string> })
+          log('info', 'resumed', { chat_guid: chatGuid })
+          return { content: [{ type: 'text', text: `resumed chat ${chatGuid}` }] }
+        }
+        writePreferences({ pauseUntil: undefined })
+        log('info', 'resumed', { chat_guid: null })
+        return { content: [{ type: 'text', text: 'resumed all inbound' }] }
+      }
+      case 'list_contacts': {
+        const access = readAccess()
+        const format = (args.format as string) === 'json' ? 'json' : 'text'
+        const summary = {
+          dm_policy: access.dmPolicy,
+          allow_from: access.allowFrom,
+          self_handles: Array.from(SELF),
+          groups: Object.entries(access.groups).map(([guid, g]) => ({
+            chat_guid: guid,
+            require_mention: g.requireMention,
+            allow_from: g.allowFrom ?? [],
+          })),
+        }
+        if (format === 'json') return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] }
+        const lines: string[] = []
+        lines.push(`dm policy: ${summary.dm_policy}`)
+        lines.push(`self handles: ${summary.self_handles.join(', ') || '(none)'}`)
+        lines.push(`allowlist (${summary.allow_from.length}): ${summary.allow_from.join(', ') || '(empty)'}`)
+        if (summary.groups.length) {
+          lines.push(`groups (${summary.groups.length}):`)
+          for (const g of summary.groups) {
+            const tag = g.require_mention ? 'mention-only' : 'open'
+            const af = g.allow_from.length ? ` [${g.allow_from.join(', ')}]` : ''
+            lines.push(`  ${g.chat_guid} — ${tag}${af}`)
+          }
+        } else {
+          lines.push('groups: (none)')
+        }
+        return { content: [{ type: 'text', text: lines.join('\n') }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -1599,7 +1714,12 @@ function expandTilde(p: string): string {
 
 function handleInbound(r: Row): void {
   if (!r.chat_guid) return
-  if (!ALLOW_SMS && r.service !== 'iMessage') return
+  // SMS/RCS gate: env (IMESSAGE_ALLOW_SMS) sets the default; preference
+  // `allowSms` overrides when explicitly set. SMS sender IDs are spoofable,
+  // so off by default in both layers.
+  const prefsSms = readPreferences().allowSms
+  const allowSms = prefsSms ?? ALLOW_SMS
+  if (!allowSms && r.service !== 'iMessage') return
 
   // style 45 = DM, 43 = group. Drop unknowns rather than risk routing a
   // group message through the DM gate and leaking a pairing code.
@@ -1721,7 +1841,33 @@ function handleInbound(r: Row): void {
       : visionBlockedReason === 'too_large'
         ? '(image attached — exceeds IMESSAGE_MAX_VISION_BYTES)'
         : ''
-  const content = text || imageMarker
+  let content = text || imageMarker
+
+  // Phase 4 pause gate. Global `pauseUntil` or per-chat `pausedChats[guid]`
+  // suppress the inbound notification entirely — the message still lands in
+  // chat.db (and tool reads will surface it when asked), but no drafting
+  // surface fires. Expired timestamps are ignored (no cleanup here; the
+  // resume/pause tools rewrite the map on the next mutation).
+  {
+    const prefs = readPreferences()
+    const now = Date.now()
+    const untilGlobal = prefs.pauseUntil ? Date.parse(prefs.pauseUntil) : NaN
+    const untilChat = prefs.pausedChats?.[r.chat_guid]
+      ? Date.parse(prefs.pausedChats[r.chat_guid]!)
+      : NaN
+    if ((Number.isFinite(untilGlobal) && untilGlobal > now) ||
+        (Number.isFinite(untilChat) && untilChat > now)) {
+      log('debug', 'inbound_paused', { chat_guid: r.chat_guid })
+      return
+    }
+    // Phase 4 NSFW banner. `nsfwFilter: 'tag'` prepends `[nsfw]` to the
+    // content body when the text matches a conservative keyword heuristic.
+    // Purely informational — does not drop the message, does not affect
+    // image gating. Operator still chooses whether to engage.
+    if (prefs.nsfwFilter === 'tag' && content && NSFW_TRIGGERS.test(content)) {
+      content = `[nsfw] ${content}`
+    }
+  }
 
   void mcp.notification({
     method: 'notifications/claude/channel',

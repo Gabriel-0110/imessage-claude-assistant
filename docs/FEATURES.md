@@ -15,6 +15,9 @@ choice, see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `thread_summary` | Single-thread stats + rendered messages + contact style notes | no |
 | `style_profile` | Global + per-contact style, preferences, approved examples | no |
 | `draft_reply` | One-call drafting context for a chat: thread + tone + custom instructions + examples + signature default | no |
+| `pause` | Suppress inbound drafting notifications globally or for a single chat for N minutes (default 60) | writes `preferences.json` (`pauseUntil` or `pausedChats`) |
+| `resume` | Clear a global or per-chat pause set by `pause` | writes `preferences.json` |
+| `list_contacts` | Read-only audit of DM policy, allowlist, self handles, and group policies | no |
 | `record_approved_reply` | Append an operator-approved reply to the style log (respects `styleLearningEnabled`) | appends JSONL + optional contact note |
 | `edit_preferences` | Read or update operator personalization (tone, signature overrides, denylist, reserved roadmap fields) | writes `preferences.json` |
 | `health_check` | Self-diagnostic: DB, state dir, policy, watermark, etc. | no |
@@ -76,6 +79,19 @@ Local-only state under `~/.claude/channels/imessage/style/`:
     content body carries a neutral marker. `IMESSAGE_MAX_VISION_BYTES`
     (env var, default 10 MiB) caps the file size allowed through the
     gate; larger files fall into the withheld path.
+  - `allowSms` (optional boolean) overrides the `IMESSAGE_ALLOW_SMS`
+    env default at runtime. Set to `true` to accept SMS/RCS inbound
+    without restarting, or `false` to harden back to iMessage-only.
+    Unset falls back to the env var (default `false`).
+  - `pauseUntil` (ISO-8601 timestamp) silently drops all inbound
+    drafting notifications until the timestamp passes. Messages still
+    land in `chat.db` and are reachable through the read tools. Set
+    via the `pause` tool; clear via `resume`.
+  - `pausedChats` (`{chat_guid: iso_timestamp}`) same pause semantics,
+    scoped to a single thread. Managed by `pause` / `resume`.
+  - `nsfwFilter: 'tag'` prefixes inbound content with a `[nsfw]`
+    banner when a conservative keyword heuristic matches. Message is
+    still delivered; the tag is a warning for the drafting surface.
 
 The global style markdown at `~/.claude/imessage-style-profile.md` is left
 untouched by the server and remains the project-level home for the overall
