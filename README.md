@@ -209,14 +209,16 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-  Login[User login] --> Plist[LaunchAgent plist]
-  Plist --> Wrapper[start-imessage-claude-service.sh]
-  Wrapper --> Run[run-imessage-claude.sh]
-  Run --> Pre[preflight.sh]
-  Pre -- ok --> Claude[claude CLI]
-  Pre -- fail --> Abort[Exit nonzero<br/>log state/launchd.err.log]
-  Claude --> MCP[spawn bun server.ts<br/>via .mcp.json]
-  MCP --> Poll[poll chat.db every 1s]
+  Login[User login] --> Agent[LaunchAgent plist]
+  Agent --> Bun[bun server.ts]
+  Bun --> Poll[poll chat.db every 1s]
+  Bun --> Bridge[HTTP bridge :7842]
+  Login --> App[iMessageAssistant.app]
+  App --> PollBridge[GET /v1/pending every 3s]
+  PollBridge --> Bridge
+  App --> Draft[claude -p generate drafts]
+  App --> Send[POST /v1/reply after approval]
+  Send --> Bridge
 ```
 
 ---
@@ -235,7 +237,9 @@ imessage-claude-assistant/
 │   ├── FEATURES.md                   Full tool catalog, env vars, state
 │   └── ARCHITECTURE.md               Component diagram and data flow
 ├── macos/
-│   └── com.gabriel.imessage-claude.plist   LaunchAgent template
+│   ├── com.gabriel.imessage-claude.plist   LaunchAgent template
+│   └── iMessageAssistant/                  SwiftUI menubar app (Xcode project)
+│       └── iMessageAssistant/              Swift sources + Views/
 ├── plugins/
 │   └── imessage/               The MCP plugin (see plugin README)
 │       ├── package.json              Bun package; version 0.9.0
@@ -427,6 +431,7 @@ The global voice summary lives at
 
 | Variable | Default | Effect |
 | --- | --- | --- |
+| `IMESSAGE_BRIDGE_ENABLED` | `false` | Set to `1` to enable the local HTTP bridge on port 7842 (required for the menubar app). |
 | `IMESSAGE_APPEND_SIGNATURE` | `true` | Appends `\nSent by Claude` to outbound messages. |
 | `IMESSAGE_ALLOW_SMS` | `false` | Accept inbound SMS/RCS in addition to iMessage. Off by default because SMS sender IDs are spoofable. |
 | `IMESSAGE_ACCESS_MODE` | *(unset)* | Set to `static` to disable runtime pairing and read `access.json` only. |
@@ -501,18 +506,21 @@ and `review` should autocomplete.
 
 ## 11. Running as a background service
 
-The assistant can run continuously in the background via a macOS
-LaunchAgent, so that iMessages are observed and surfaced as soon as you
-log in — without keeping a terminal open.
+The MCP server runs continuously in the background via a macOS LaunchAgent, so that iMessages are observed and the bridge HTTP server is available as soon as you log in — without keeping a terminal open.
 
 ### 11.1 Concept
 
-A LaunchAgent plist declares a user-scoped process that launchd
-supervises. Our plist
+A LaunchAgent plist declares a user-scoped process that launchd supervises. The plist
 ([macos/com.gabriel.imessage-claude.plist](macos/com.gabriel.imessage-claude.plist))
-runs [`scripts/start-imessage-claude-service.sh`](scripts/start-imessage-claude-service.sh),
-which wraps `run-imessage-claude.sh` so that Claude Code and the MCP
-server start together under launchd supervision.
+runs **bun directly** — no shell wrapper or Claude Code process:
+
+```
+launchd → bun run --cwd <repo>/plugins/imessage start
+            ↳ polls chat.db every 1 s
+            ↳ HTTP bridge on :7842 (when IMESSAGE_BRIDGE_ENABLED=1)
+```
+
+The `iMessageAssistant.app` menubar app runs as a Login Item (registered via `SMAppService`) and connects to the bridge independently.
 
 ### 11.2 Install
 
@@ -536,9 +544,8 @@ into launchd.
 
 Under `state/` at the repo root:
 
-- `service.log` — wrapper script output
-- `launchd.out.log` — stdout from the supervised process
-- `launchd.err.log` — stderr from the supervised process
+- `launchd.out.log` — stdout from bun (normal operation messages)
+- `launchd.err.log` — stderr from bun (errors, warnings)
 
 Tail them with `tail -f state/launchd.err.log`. For structured logs,
 set `IMESSAGE_LOG_JSON=true` in the plist's `EnvironmentVariables`.

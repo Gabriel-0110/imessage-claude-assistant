@@ -5,15 +5,18 @@ import Foundation
 struct PendingThread: Identifiable, Decodable {
     let chat_guid: String
     let kind: String          // "dm" or "group"
+    let display_name: String? // named group chats
     let participants: [String]
     let last_ts: String
+    let last_preview: String? // server field name
     let unreplied: Bool
-    let preview: String?
 
     var id: String { chat_guid }
+    var preview: String? { last_preview } // UI shim
 
     var displayName: String {
-        participants.first ?? chat_guid
+        if let d = display_name, !d.isEmpty { return d }
+        return participants.first ?? chat_guid
     }
 
     var relativeTime: String {
@@ -30,26 +33,27 @@ struct PendingThread: Identifiable, Decodable {
 
 struct DraftContext: Decodable {
     let chat_guid: String
+    let kind: String
     let participants: [String]
-    let messages: [ContextMessage]
-    let contact_handle: String?
-    let style_notes: String?
+    let primary_contact: String?   // server field name
+    let recent_thread: String      // pre-formatted by server's renderConversation()
+    let drafting_context: DraftingContext?
 
-    struct ContextMessage: Decodable {
-        let text: String
-        let is_from_me: Bool
-        let ts: String
+    struct DraftingContext: Decodable {
+        let tone: String?
+        let contact_style_notes: String?
+        let custom_instructions: String?
+        let contact_custom_instructions: String?
+        let global_style_profile: String?
     }
 
-    var formattedThread: String {
-        messages.map { m in
-            let who = m.is_from_me ? "Me" : (participants.first ?? "Them")
-            return "\(who): \(m.text)"
-        }.joined(separator: "\n")
-    }
+    // Shims for DraftService / UI compatibility
+    var formattedThread: String { recent_thread }
+    var contact_handle: String? { primary_contact }
+    var style_notes: String? { drafting_context?.contact_style_notes }
 }
 
-struct DraftOption: Identifiable {
+struct DraftOption: Identifiable, Equatable {
     let id = UUID()
     let label: String
     let text: String

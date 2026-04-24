@@ -49,7 +49,7 @@ struct ReplyOptionsView: View {
         .onAppear {
             editedTexts = appState.drafts.map(\.text)
         }
-        .onChange(of: appState.drafts) { drafts in
+        .onChange(of: appState.drafts) { _, drafts in
             editedTexts = drafts.map(\.text)
             selectedIndex = 0
         }

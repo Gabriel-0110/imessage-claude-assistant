@@ -2,7 +2,16 @@ import Foundation
 
 /// Spawns `claude -p` to generate 3 draft reply options from thread context.
 struct DraftService {
-    static let claudePath = "/Users/gabrielchiappa/.local/bin/claude"
+    private static func findClaudePath() -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "\(home)/.local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            ?? "\(home)/.local/bin/claude"
+    }
 
     static func generateDrafts(context: DraftContext) async throws -> [DraftOption] {
         let prompt = buildPrompt(context: context)
@@ -40,7 +49,7 @@ struct DraftService {
     private static func runClaude(prompt: String) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: claudePath)
+            process.executableURL = URL(fileURLWithPath: findClaudePath())
             process.arguments = ["-p", prompt]
 
             let stdout = Pipe()

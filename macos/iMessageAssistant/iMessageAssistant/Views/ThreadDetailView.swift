@@ -38,13 +38,12 @@ struct ThreadDetailView: View {
             // Message history
             if let ctx = appState.draftContext {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(ctx.messages.indices, id: \.self) { i in
-                            let msg = ctx.messages[i]
-                            MessageBubble(text: msg.text, isFromMe: msg.is_from_me)
-                        }
-                    }
-                    .padding(12)
+                    Text(ctx.formattedThread)
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
                 }
                 .frame(maxHeight: 160)
             } else if appState.isGeneratingDrafts {
@@ -87,21 +86,3 @@ struct ThreadDetailView: View {
     }
 }
 
-struct MessageBubble: View {
-    let text: String
-    let isFromMe: Bool
-
-    var body: some View {
-        HStack {
-            if isFromMe { Spacer(minLength: 40) }
-            Text(text)
-                .font(.caption)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(isFromMe ? Color.blue : Color(NSColor.controlBackgroundColor))
-                .foregroundColor(isFromMe ? .white : .primary)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            if !isFromMe { Spacer(minLength: 40) }
-        }
-    }
-}
