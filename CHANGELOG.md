@@ -4,6 +4,19 @@
 
 ### Changed
 
+- `handleInbound` now gates inbound-image exposure behind
+  `preferences.visionEnabled`. When the operator has not opted in
+  (default), the `image_path` attribute is stripped from the
+  notification meta and the content body carries a short marker
+  (`"(image attached — vision disabled in preferences)"`) instead of
+  the raw path. With `visionEnabled: true`, behaviour matches prior
+  releases: the first image attachment's absolute path is surfaced so
+  Claude can `Read` it. A size cap (`IMESSAGE_MAX_VISION_BYTES`,
+  default 10 MiB) drops oversized files into the same "withheld"
+  code path rather than handing multi-megabyte reads to the model.
+- Server instructions now tell Claude that `image_path` is only
+  present when `visionEnabled` is true, and that its absence is
+  intentional.
 - Plugin renamed from `imessage-local` to `imessage`. Slash commands
   are now namespaced as `/imessage:access`, `/imessage:configure`,
   `/imessage:review` (the previous `imessage-local` name had produced
@@ -14,8 +27,37 @@
 - `settings.json` consumers must update
   `enabledPlugins["imessage-local@…"]` → `enabledPlugins["imessage@…"]`
   and `allowedChannelPlugins[].plugin` → `"imessage"`.
+- `record_approved_reply` now honours
+  `preferences.styleLearningEnabled`. When set to `false`, approved
+  replies are not appended to the JSONL log and contact notes are not
+  written; the tool returns a short "learning disabled" message.
+  Default (unset) remains learn-on.
+- `style_profile` output now leads with a dedicated "drafting context"
+  block that names the effective tone, the global custom
+  instructions, and any contact-specific custom instructions, so
+  drafting calls don't need a separate `edit_preferences get`.
 
 ### Added
+
+- Inbound vision gate controlled by `preferences.visionEnabled`
+  (default `false`). When enabled, inbound image attachments are
+  surfaced to Claude via `image_path` just as before; when disabled,
+  the path is withheld and only the existence of the image is
+  announced in the content body. New env var
+  `IMESSAGE_MAX_VISION_BYTES` (default 10 MiB) caps the file size
+  allowed through the gate; oversized images fall into the same
+  "withheld" path with a distinct marker.
+- `draft_reply(chat_guid)` MCP tool — single call that assembles all
+  drafting context for a chat: recent rendered thread, tone, custom
+  instructions (global + per-contact), contact style notes, global
+  style profile, a handful of recent approved examples, participants,
+  unread state, activity counts, and the resolved signature default
+  (per-contact override honoured). Read-only; does not send.
+- Inbound denylist gate: `preferences.denyFrom` (populated via
+  `/imessage:settings deny add|remove` or `edit_preferences`) now
+  silently drops messages from listed handles before the access-control
+  policy runs. Self-chat still bypasses. Denied senders never see a
+  pairing code or any reply.
 
 - `edit_preferences` MCP tool and `/imessage:settings` skill for
   managing operator personalization in

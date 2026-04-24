@@ -14,8 +14,9 @@ choice, see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `pending_replies` | Threads whose last message is inbound and unanswered | no |
 | `thread_summary` | Single-thread stats + rendered messages + contact style notes | no |
 | `style_profile` | Global + per-contact style, preferences, approved examples | no |
-| `record_approved_reply` | Append an operator-approved reply to the style log | appends JSONL + optional contact note |
-| `edit_preferences` | Read or update operator personalization (tone, signature overrides, reserved roadmap fields) | writes `preferences.json` |
+| `draft_reply` | One-call drafting context for a chat: thread + tone + custom instructions + examples + signature default | no |
+| `record_approved_reply` | Append an operator-approved reply to the style log (respects `styleLearningEnabled`) | appends JSONL + optional contact note |
+| `edit_preferences` | Read or update operator personalization (tone, signature overrides, denylist, reserved roadmap fields) | writes `preferences.json` |
 | `health_check` | Self-diagnostic: DB, state dir, policy, watermark, etc. | no |
 
 All read tools are scoped to **allowlisted chats only** — messages from
@@ -61,6 +62,20 @@ Local-only state under `~/.claude/channels/imessage/style/`:
   overrides per contact, arbitrary notes, plus reserved fields for upcoming
   phases). Manage via `/imessage:settings` / the `edit_preferences` MCP tool,
   or hand-edit — the server re-reads the file on every tool call.
+  - `denyFrom` is active: listed handles are silently dropped on inbound
+    before the allowlist gate runs.
+  - `styleLearningEnabled: false` disables `record_approved_reply` writes
+    (JSONL + contact notes). Default is learn-on.
+  - `defaultTone` and `customInstructions` (global + per-contact) are
+    surfaced by `style_profile` and `draft_reply` so Claude can respect
+    them when composing options.
+  - `visionEnabled` (default `false`) controls whether inbound image
+    attachments are exposed to Claude. When `true`, `handleInbound`
+    attaches an `image_path` to the channel notification so the model
+    can `Read` the file. When `false`, the path is withheld and the
+    content body carries a neutral marker. `IMESSAGE_MAX_VISION_BYTES`
+    (env var, default 10 MiB) caps the file size allowed through the
+    gate; larger files fall into the withheld path.
 
 The global style markdown at `~/.claude/imessage-style-profile.md` is left
 untouched by the server and remains the project-level home for the overall
@@ -87,6 +102,7 @@ write. This prevents prompt injection from warping the assistant's voice.
 | `IMESSAGE_ACCESS_MODE` | unset | Set to `static` to freeze access.json at boot |
 | `IMESSAGE_APPEND_SIGNATURE` | `true` | Append `Sent by Claude` signature (set `false` to disable) |
 | `IMESSAGE_ALLOW_SMS` | `false` | Accept SMS/RCS inbound (default iMessage-only; SMS sender IDs are spoofable) |
+| `IMESSAGE_MAX_VISION_BYTES` | `10485760` | Max inbound image size (bytes) that can pass the `visionEnabled` gate |
 | `IMESSAGE_LOG_JSON` | `false` | JSON-structured stderr |
 | `IMESSAGE_LOG_LEVEL` | `info` | Minimum level to emit |
 

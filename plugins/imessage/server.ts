@@ -36,6 +36,15 @@ const APPEND_SIGNATURE = process.env.IMESSAGE_APPEND_SIGNATURE !== 'false'
 // drops SMS/RCS so a forged sender can't reach the gate. Opt in only if you
 // understand the risk.
 const ALLOW_SMS = process.env.IMESSAGE_ALLOW_SMS === 'true'
+// Upper bound on inline image size surfaced to vision. Keeps a pathologically
+// large attachment from blowing the context window or pulling a multi-MB file
+// into every inbound notification. Opt-out by raising the env var.
+const MAX_VISION_BYTES = (() => {
+  const raw = process.env.IMESSAGE_MAX_VISION_BYTES
+  if (!raw) return 10 * 1024 * 1024
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : 10 * 1024 * 1024
+})()
 const SIGNATURE = '\nSent by Claude'
 const CHAT_DB =
   process.env.IMESSAGE_DB_PATH ?? join(homedir(), 'Library', 'Messages', 'chat.db')
@@ -934,7 +943,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads iMessage, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from iMessage arrive as <channel source="imessage" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is an image the sender attached. Reply with the reply tool — pass chat_id back.',
+      'Messages from iMessage arrive as <channel source="imessage" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is an image the sender attached. The image_path attribute only appears when the operator has set visionEnabled: true in preferences; otherwise the content body will note that an image was withheld. Reply with the reply tool — pass chat_id back.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments.',
       '',
@@ -1144,6 +1153,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'draft_reply',
+      description:
+        'Assemble drafting context for a single allowlisted chat so Claude can produce 3 reply options in one shot: recent thread, tone, custom instructions (global + per-contact), contact style notes, a handful of recent approved examples, and signature policy. Read-only. Does NOT send — the caller must still get explicit operator approval and call reply(). Prefer this over chaining thread_summary + style_profile when the goal is to draft.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_guid: { type: 'string' },
+          messages: { type: 'number', description: 'Recent messages to include (default 20, max 100).' },
+          examples: { type: 'number', description: 'Approved examples to include (default 5, max 50).' },
+          lookback_hours: { type: 'number', description: 'Window for activity stats (default 168).' },
+        },
+        required: ['chat_guid'],
+      },
+    },
   ],
 }))
 
@@ -1283,8 +1307,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const contactProfile = contact ? readContactStyle(contact) : null
         const prefs = readPreferences()
         const examples = readApprovedExamples(nExamples, contact)
+        // Phase 2: surface tone + custom instructions as a dedicated block
+        // so Claude can weave them into drafts without parsing the raw
+        // preferences JSON. Contact-specific overrides shadow the global.
+        const tone = prefs.defaultTone ?? 'neutral'
+        const globalCustom = prefs.customInstructions?.trim() ?? ''
+        const contactCustom = contact
+          ? (prefs.customInstructionsPerContact?.[contact]?.trim() ?? '')
+          : ''
         const parts: string[] = []
-        parts.push(`=== global style profile (${GLOBAL_STYLE_FILE}) ===`)
+        parts.push(`=== drafting context ===`)
+        parts.push(`tone: ${tone}`)
+        parts.push(globalCustom ? `custom_instructions: ${globalCustom}` : 'custom_instructions: (none)')
+        if (contact) {
+          parts.push(contactCustom
+            ? `contact_custom_instructions: ${contactCustom}`
+            : 'contact_custom_instructions: (none)')
+        }
+        parts.push(`\n=== global style profile (${GLOBAL_STYLE_FILE}) ===`)
         parts.push(global ? global.trim() : '(no global style profile yet)')
         if (contact) {
           parts.push(`\n=== contact profile (${contact}) ===`)
@@ -1303,6 +1343,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (!contact) throw new Error('contact is required')
         if (!final_text) throw new Error('final_text is required')
         if (!['send', 'edit', 'new'].includes(decision)) throw new Error('decision must be send|edit|new')
+        // Phase 2: honour the styleLearningEnabled preference. When the
+        // operator has opted out, we skip BOTH the JSONL append and the
+        // per-contact note — nothing about the approved reply is
+        // persisted. Returning a distinct message makes the skip
+        // observable; the caller still sees success.
+        const prefs = readPreferences()
+        if (prefs.styleLearningEnabled === false) {
+          log('info', 'approved_reply_skipped', { contact, decision, reason: 'styleLearningEnabled=false' })
+          return { content: [{ type: 'text', text: `learning disabled — not recorded (${decision}) for ${contact}` }] }
+        }
         const entry: Record<string, unknown> = {
           contact,
           decision,
@@ -1416,6 +1466,78 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         })
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
       }
+      case 'draft_reply': {
+        const guid = args.chat_guid as string
+        if (!guid) throw new Error('chat_guid is required')
+        const allowed = allowedChatGuids()
+        if (!allowed.has(guid)) {
+          throw new Error(`chat ${guid} is not allowlisted — add via /imessage:access`)
+        }
+        const msgLimit = Math.min(Math.max(1, (args.messages as number) ?? 20), 100)
+        const exLimit = Math.min(Math.max(0, (args.examples as number) ?? 5), 50)
+        const lookback = Math.min(Math.max(1, (args.lookback_hours as number) ?? 168), 720)
+
+        const prefs = readPreferences()
+        const info = qChatInfo.get(guid)
+        const participants = qChatParticipants.all(guid).map(p => p.id)
+        const kind = info?.style === 43 ? 'group' : 'dm'
+        const primaryContact = kind === 'dm' && participants.length > 0 ? participants[0] : null
+
+        const sinceNs = toAppleNs(Date.now() - lookback * 3600 * 1000)
+        const stats = qThreadStats.get(guid, sinceNs) ?? { inbound: 0, outbound: 0 }
+        const rows = qHistory.all(guid, msgLimit).reverse()
+        const renderedThread = rows.length === 0 ? '(no messages)' : renderConversation(guid, rows)
+        const lastInbound = [...rows].reverse().find(r => r.is_from_me === 0) ?? null
+        const unreplied = rows.length > 0 ? rows[rows.length - 1]!.is_from_me === 0 : false
+
+        const tone = prefs.defaultTone ?? 'neutral'
+        const globalCustom = prefs.customInstructions?.trim() ?? ''
+        const contactCustom = primaryContact
+          ? (prefs.customInstructionsPerContact?.[primaryContact]?.trim() ?? '')
+          : ''
+        const contactNotes = primaryContact ? (readContactStyle(primaryContact) ?? '').trim() : ''
+        const globalStyle = (readTextSafe(GLOBAL_STYLE_FILE) ?? '').trim()
+        const approvedExamples = exLimit > 0 ? readApprovedExamples(exLimit, primaryContact ?? undefined) : []
+
+        // Signature resolution: per-contact override trumps the env default.
+        const sigPerContact = primaryContact ? prefs.signaturePerContact?.[primaryContact] : undefined
+        const signatureEnabled = sigPerContact ?? APPEND_SIGNATURE
+        const signatureText = signatureEnabled ? SIGNATURE : null
+
+        const ctx = {
+          chat_guid: guid,
+          kind,
+          participants,
+          primary_contact: primaryContact,
+          unreplied,
+          last_inbound: lastInbound ? {
+            ts: appleDate(lastInbound.date).toISOString(),
+            from: lastInbound.handle_id ?? 'unknown',
+          } : null,
+          activity: {
+            window_hours: lookback,
+            inbound: stats.inbound ?? 0,
+            outbound: stats.outbound ?? 0,
+          },
+          drafting_context: {
+            tone,
+            custom_instructions: globalCustom || null,
+            contact_custom_instructions: contactCustom || null,
+            contact_style_notes: contactNotes || null,
+            global_style_profile: globalStyle || null,
+          },
+          signature: {
+            enabled_by_default: signatureEnabled,
+            default_text: signatureText,
+            note: 'Operator must still pick keep/change/remove before sending; pass via reply(signature=...).',
+          },
+          recent_thread: renderedThread,
+          approved_examples: approvedExamples,
+          reminder: 'Produce 3 reply options (safest, warm, shortest) and WAIT for explicit operator approval. Do not call reply() without explicit send/edit/new instruction from the operator.',
+        }
+
+        return { content: [{ type: 'text', text: JSON.stringify(ctx, null, 2) }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -1507,6 +1629,15 @@ function handleInbound(r: Row): void {
 
   // Self-chat bypasses access control — you're the owner.
   if (!isSelfChat) {
+    // Denylist gate: per-operator personal blocklist layered on top of the
+    // access-control allowlist. Dropped silently BEFORE the policy check so
+    // denied senders never trigger pairing codes or any other outbound
+    // response. Group messages are also honoured if any participant handle
+    // is on the list — here we only see the sender, which is sufficient.
+    const prefs = readPreferences()
+    const deny = prefs.denyFrom ?? []
+    if (deny.length && deny.includes(sender.toLowerCase())) return
+
     const result = gate({
       senderId: sender,
       chatGuid: r.chat_guid,
@@ -1556,9 +1687,41 @@ function handleInbound(r: Row): void {
     }
   }
 
+  // Phase 3 vision gate. Surfacing image_path lets Claude Read the file,
+  // which hands raw pixel bytes to the vision pipeline. That costs tokens
+  // and may expose the operator to inbound prompt injection rendered as
+  // text inside an image. Opt-in only: when visionEnabled !== true we
+  // still note the presence of an image (so Claude knows the sender
+  // included something) but the path is withheld and the file is never
+  // read. Enable via /imessage:settings vision on.
+  let visionBlockedReason: 'disabled' | 'too_large' | undefined
+  if (imagePath) {
+    const prefs = readPreferences()
+    if (prefs.visionEnabled !== true) {
+      visionBlockedReason = 'disabled'
+    } else {
+      try {
+        const st = statSync(imagePath)
+        if (st.size > MAX_VISION_BYTES) visionBlockedReason = 'too_large'
+      } catch {
+        // file vanished between DB row and disk read — drop silently, same
+        // as if there were no attachment.
+        imagePath = undefined
+      }
+    }
+    if (visionBlockedReason) imagePath = undefined
+  }
+
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
-  const content = text || (imagePath ? '(image)' : '')
+  const imageMarker = imagePath
+    ? '(image)'
+    : visionBlockedReason === 'disabled'
+      ? '(image attached — vision disabled in preferences)'
+      : visionBlockedReason === 'too_large'
+        ? '(image attached — exceeds IMESSAGE_MAX_VISION_BYTES)'
+        : ''
+  const content = text || imageMarker
 
   void mcp.notification({
     method: 'notifications/claude/channel',
