@@ -1,6 +1,6 @@
 {
   "name": "imessage",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Local iMessage MCP channel server for Claude Code.",
   "license": "Apache-2.0",
   "author": "Gabriel Chiappa",

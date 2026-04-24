@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_imessage_imessage__style_profile",
+      "mcp__plugin_imessage_imessage__reply",
+      "mcp__plugin_imessage_imessage__record_approved_reply",
+      "mcp__plugin_imessage_imessage__thread_summary",
+      "mcp__plugin_imessage_imessage__pending_replies",
+      "Skill(imessage:access)",
+      "mcp__plugin_imessage_imessage__edit_preferences"
+    ]
+  }
+}

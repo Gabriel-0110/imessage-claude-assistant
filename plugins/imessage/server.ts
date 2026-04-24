@@ -630,8 +630,8 @@ type Preferences = {
   denyFrom?: string[]                                   // phase 2
   memoryPath?: string                                   // phase 5 — overrides GLOBAL_STYLE_FILE path for memory_editor + style reads
   schedulerEnabled?: boolean                            // phase 5 — gates schedule_reply tool (default false)
-  bridgeEnabled?: boolean                               // Bridge phase (default false)
-  bridgeToken?: string                                  // Bridge phase — paired-device shared secret (TODO: migrate to Keychain)
+  bridgeEnabled?: boolean                               // phase 6 — gates LAN HTTP bridge + Bonjour advertisement (default false)
+  bridgeToken?: string                                  // phase 6 — paired-device shared secret; auto-generated on first bridge start if unset (TODO: migrate to Keychain)
 }
 
 // Every top-level key we recognise. The editor tool rejects anything else to
@@ -913,6 +913,330 @@ function writeScheduled(entries: ScheduledReply[]): void {
   const tmp = SCHEDULED_FILE + '.tmp'
   writeFileSync(tmp, JSON.stringify({ entries }, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, SCHEDULED_FILE)
+}
+
+// --- shared send path --------------------------------------------------------
+// Extracted from the `reply` MCP tool so the Phase 6 LAN bridge can reuse the
+// exact same validation, chunking, and signature resolution. Callers must
+// already have operator approval of the exact text — this helper does not
+// make policy decisions about consent, it just executes the send.
+
+type PerformSendOpts = {
+  chat_id: string
+  text: string
+  files?: string[]
+  signature?: string
+}
+
+function performSend(opts: PerformSendOpts): { sent: number } {
+  const { chat_id, text, signature: sigArg } = opts
+  const files = opts.files ?? []
+
+  if (!allowedChatGuids().has(chat_id)) {
+    throw new Error(`chat ${chat_id} is not allowlisted — add via /imessage:access`)
+  }
+
+  for (const f of files) {
+    assertSendable(f)
+    const st = statSync(f)
+    if (st.size > MAX_ATTACHMENT_BYTES) {
+      throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 100MB)`)
+    }
+  }
+
+  // Per-send signature resolution:
+  //   undefined | 'default' → server default (APPEND_SIGNATURE + SIGNATURE)
+  //   'none' | ''           → omit
+  //   any other string      → use as-is, prefix '\n' if missing
+  let effectiveSig: string | null
+  if (sigArg === undefined || sigArg === 'default') {
+    effectiveSig = APPEND_SIGNATURE ? SIGNATURE : null
+  } else if (sigArg === 'none' || sigArg === '') {
+    effectiveSig = null
+  } else {
+    effectiveSig = sigArg.startsWith('\n') ? sigArg : '\n' + sigArg
+  }
+
+  const access = loadAccess()
+  const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  const mode = access.chunkMode ?? 'length'
+  const chunks = chunk(text, limit, mode)
+  if (effectiveSig && chunks.length > 0) chunks[chunks.length - 1] += effectiveSig
+  let sent = 0
+
+  for (let i = 0; i < chunks.length; i++) {
+    const err = sendText(chat_id, chunks[i])
+    if (err) throw new Error(`chunk ${i + 1}/${chunks.length} failed (${sent} sent ok): ${err}`)
+    sent++
+  }
+  for (const f of files) {
+    const err = sendAttachment(chat_id, f)
+    if (err) throw new Error(`attachment ${basename(f)} failed (${sent} sent ok): ${err}`)
+    sent++
+  }
+  return { sent }
+}
+
+// --- shared draft-reply context builder --------------------------------------
+// Extracted so the Phase 6 LAN bridge can serve the same context as the
+// draft_reply MCP tool without duplicating the query + preference plumbing.
+
+function buildDraftReplyContext(
+  guid: string,
+  msgLimit: number,
+  exLimit: number,
+  lookback: number,
+) {
+  const prefs = readPreferences()
+  const info = qChatInfo.get(guid)
+  const participants = qChatParticipants.all(guid).map(p => p.id)
+  const kind = info?.style === 43 ? 'group' : 'dm'
+  const primaryContact = kind === 'dm' && participants.length > 0 ? participants[0] : null
+
+  const sinceNs = toAppleNs(Date.now() - lookback * 3600 * 1000)
+  const stats = qThreadStats.get(guid, sinceNs) ?? { inbound: 0, outbound: 0 }
+  const rows = qHistory.all(guid, msgLimit).reverse()
+  const renderedThread = rows.length === 0 ? '(no messages)' : renderConversation(guid, rows)
+  const lastInbound = [...rows].reverse().find(r => r.is_from_me === 0) ?? null
+  const unreplied = rows.length > 0 ? rows[rows.length - 1]!.is_from_me === 0 : false
+
+  const tone = prefs.defaultTone ?? 'neutral'
+  const globalCustom = prefs.customInstructions?.trim() ?? ''
+  const contactCustom = primaryContact
+    ? (prefs.customInstructionsPerContact?.[primaryContact]?.trim() ?? '')
+    : ''
+  const contactNotes = primaryContact ? (readContactStyle(primaryContact) ?? '').trim() : ''
+  const globalStyle = (readTextSafe(resolveGlobalStyleFile()) ?? '').trim()
+  const approvedExamples = exLimit > 0 ? readApprovedExamples(exLimit, primaryContact ?? undefined) : []
+
+  const sigPerContact = primaryContact ? prefs.signaturePerContact?.[primaryContact] : undefined
+  const signatureEnabled = sigPerContact ?? APPEND_SIGNATURE
+  const signatureText = signatureEnabled ? SIGNATURE : null
+
+  return {
+    chat_guid: guid,
+    kind,
+    participants,
+    primary_contact: primaryContact,
+    unreplied,
+    last_inbound: lastInbound ? {
+      ts: appleDate(lastInbound.date).toISOString(),
+      from: lastInbound.handle_id ?? 'unknown',
+    } : null,
+    activity: {
+      window_hours: lookback,
+      inbound: stats.inbound ?? 0,
+      outbound: stats.outbound ?? 0,
+    },
+    drafting_context: {
+      tone,
+      custom_instructions: globalCustom || null,
+      contact_custom_instructions: contactCustom || null,
+      contact_style_notes: contactNotes || null,
+      global_style_profile: globalStyle || null,
+    },
+    signature: {
+      enabled_by_default: signatureEnabled,
+      default_text: signatureText,
+      note: 'Operator must still pick keep/change/remove before sending; pass via reply(signature=...).',
+    },
+    recent_thread: renderedThread,
+    approved_examples: approvedExamples,
+    reminder: 'Produce 3 reply options (safest, warm, shortest) and WAIT for explicit operator approval. Do not call reply() without explicit send/edit/new instruction from the operator.',
+  }
+}
+
+// --- Phase 6: LAN bridge (ReplyPilot iOS companion) --------------------------
+// Optional HTTP server bound to LAN (0.0.0.0) that lets a paired client
+// (planned: an iOS app) list pending threads, fetch draft context, and POST a
+// `/v1/reply` after the operator taps "send" on the phone. All endpoints
+// require `Authorization: Bearer <bridgeToken>`. The token is auto-generated
+// on first start if unset and written back into preferences.json.
+//
+// Security invariants:
+//   - Token is required on every request; constant-time compared.
+//   - Sends still go through `performSend`, so the allowlist / attachment /
+//     chunking / signature rules are identical to the MCP `reply` tool.
+//   - The bridge does NOT auto-send drafts. Operator approval = the tap on
+//     the client that triggers POST /v1/reply with the exact final text.
+//   - No TLS in v1. LAN + token is the threat model. Follow-up: TLS + mTLS.
+//   - bridgeToken currently lives in preferences.json; Keychain migration
+//     is a planned follow-up.
+// Bonjour advertisement uses macOS `dns-sd` spawned as a child process so we
+// don't take a new runtime dependency just to broadcast mDNS.
+
+const BRIDGE_DEFAULT_PORT = 7842
+const BRIDGE_SERVICE_TYPE = '_replypilot._tcp'
+
+let bridgeServer: ReturnType<typeof Bun.serve> | null = null
+let bridgeBonjour: ReturnType<typeof Bun.spawn> | null = null
+let bridgeStartedAt = 0
+let bridgeBoundPort = 0
+let bridgeTokenCache: string | null = null
+
+function safeEq(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
+}
+
+function ensureBridgeToken(): string {
+  const prefs = readPreferences()
+  if (typeof prefs.bridgeToken === 'string' && prefs.bridgeToken.length >= 32) {
+    bridgeTokenCache = prefs.bridgeToken
+    return prefs.bridgeToken
+  }
+  const token = randomBytes(32).toString('hex')
+  writePreferences(validatePreferencesPartial({ bridgeToken: token }))
+  bridgeTokenCache = token
+  log('info', 'bridge_token_generated', { fingerprint: token.slice(-8) })
+  return token
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+async function handleBridgeRequest(req: Request, token: string): Promise<Response> {
+  const url = new URL(req.url)
+  const auth = req.headers.get('authorization') ?? ''
+  const expected = `Bearer ${token}`
+  if (!safeEq(auth, expected)) {
+    return new Response('unauthorized', { status: 401 })
+  }
+  try {
+    if (req.method === 'GET' && url.pathname === '/v1/health') {
+      return jsonResponse({
+        ok: true,
+        uptime_ms: Date.now() - bridgeStartedAt,
+        port: bridgeBoundPort,
+        service: BRIDGE_SERVICE_TYPE,
+      })
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/pending') {
+      const lookbackParam = parseInt(url.searchParams.get('lookback_hours') ?? '', 10)
+      const maxParam = parseInt(url.searchParams.get('max') ?? '', 10)
+      const lookback = Number.isFinite(lookbackParam) && lookbackParam > 0
+        ? Math.min(lookbackParam, 720) : 48
+      const max = Number.isFinite(maxParam) && maxParam > 0
+        ? Math.min(maxParam, 100) : 20
+      const list = buildOverview(lookback, true).slice(0, max)
+      return jsonResponse({ threads: list })
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/draft') {
+      const guid = url.searchParams.get('chat_guid')
+      if (!guid) return jsonResponse({ error: 'chat_guid is required' }, 400)
+      if (!allowedChatGuids().has(guid)) {
+        return jsonResponse({ error: `chat ${guid} is not allowlisted` }, 403)
+      }
+      const ctx = buildDraftReplyContext(guid, 20, 5, 168)
+      return jsonResponse(ctx)
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/reply') {
+      let body: { chat_guid?: string; text?: string; signature?: string; files?: string[] }
+      try {
+        body = await req.json() as typeof body
+      } catch {
+        return jsonResponse({ error: 'body must be JSON' }, 400)
+      }
+      if (!body.chat_guid || !body.text) {
+        return jsonResponse({ error: 'chat_guid and text are required' }, 400)
+      }
+      // Reject attachment paths from the bridge — the iOS client doesn't
+      // have a notion of local filesystem paths on the server machine, and
+      // allowing arbitrary paths over the network is a footgun. Text only
+      // in v1; attachments can be a later audited path.
+      if (body.files && body.files.length > 0) {
+        return jsonResponse({ error: 'attachments are not allowed over the bridge' }, 400)
+      }
+      const { sent } = performSend({
+        chat_id: body.chat_guid,
+        text: body.text,
+        signature: body.signature,
+      })
+      log('info', 'bridge_reply_sent', { chat_guid: body.chat_guid, sent })
+      return jsonResponse({ sent })
+    }
+    return new Response('not found', { status: 404 })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log('warn', 'bridge_request_failed', { path: url.pathname, error: msg })
+    return jsonResponse({ error: msg }, 400)
+  }
+}
+
+function advertiseBonjour(port: number): void {
+  try {
+    bridgeBonjour = Bun.spawn({
+      cmd: ['dns-sd', '-R', 'ReplyPilot', BRIDGE_SERVICE_TYPE, '.', String(port)],
+      stdout: 'ignore',
+      stderr: 'pipe',
+    })
+    log('info', 'bridge_bonjour_advertised', { service: BRIDGE_SERVICE_TYPE, port })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log('warn', 'bridge_bonjour_failed', { error: msg })
+  }
+}
+
+function startBridge(): void {
+  if (bridgeServer) return
+  const prefs = readPreferences()
+  if (prefs.bridgeEnabled !== true) return
+  const token = ensureBridgeToken()
+  const envPort = parseInt(process.env.IMESSAGE_BRIDGE_PORT ?? '', 10)
+  const port = Number.isFinite(envPort) && envPort > 0 ? envPort : BRIDGE_DEFAULT_PORT
+  try {
+    bridgeServer = Bun.serve({
+      port,
+      hostname: '0.0.0.0',
+      fetch: (req) => handleBridgeRequest(req, token),
+      error: (err) => {
+        log('warn', 'bridge_server_error', { error: err.message })
+        return new Response('internal error', { status: 500 })
+      },
+    })
+    bridgeBoundPort = bridgeServer.port
+    bridgeStartedAt = Date.now()
+    log('info', 'bridge_started', {
+      port: bridgeBoundPort,
+      token_fp: token.slice(-8),
+    })
+    advertiseBonjour(bridgeBoundPort)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log('warn', 'bridge_start_failed', { error: msg })
+  }
+}
+
+function stopBridge(): void {
+  if (bridgeBonjour) {
+    try { bridgeBonjour.kill() } catch {}
+    bridgeBonjour = null
+  }
+  if (bridgeServer) {
+    try { bridgeServer.stop(true) } catch {}
+    bridgeServer = null
+    log('info', 'bridge_stopped', {})
+  }
+}
+
+function bridgeStatus(): Record<string, unknown> {
+  const prefs = readPreferences()
+  return {
+    enabled_preference: prefs.bridgeEnabled === true,
+    running: bridgeServer !== null,
+    port: bridgeBoundPort || null,
+    service: BRIDGE_SERVICE_TYPE,
+    bonjour: bridgeBonjour !== null,
+    uptime_ms: bridgeServer ? Date.now() - bridgeStartedAt : null,
+    token_fingerprint: bridgeTokenCache ? bridgeTokenCache.slice(-8) : null,
+    token_present: typeof prefs.bridgeToken === 'string' && prefs.bridgeToken.length >= 32,
+  }
 }
 
 // --- overview / pending-reply queries ----------------------------------------
@@ -1365,6 +1689,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['target', 'action'],
       },
     },
+    {
+      name: 'bridge_status',
+      description:
+        'Report the state of the Phase 6 LAN bridge for the ReplyPilot iOS companion: whether it is enabled in preferences, whether the HTTP server is currently running, the bound port, the advertised Bonjour service type, whether the mDNS advertisement subprocess is alive, uptime, and the last 8 characters of the bearer token (for pairing verification). Read-only.',
+      inputSchema: { type: 'object', properties: {} },
+    },
   ],
 }))
 
@@ -1377,50 +1707,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const files = (args.files as string[] | undefined) ?? []
         const sigArg = args.signature as string | undefined
-
-        if (!allowedChatGuids().has(chat_id)) {
-          throw new Error(`chat ${chat_id} is not allowlisted — add via /imessage:access`)
-        }
-
-        for (const f of files) {
-          assertSendable(f)
-          const st = statSync(f)
-          if (st.size > MAX_ATTACHMENT_BYTES) {
-            throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 100MB)`)
-          }
-        }
-
-        // Per-send signature resolution:
-        //   undefined | 'default' → server default (APPEND_SIGNATURE + SIGNATURE)
-        //   'none' | ''           → omit
-        //   any other string      → use as-is, prefix '\n' if missing
-        let effectiveSig: string | null
-        if (sigArg === undefined || sigArg === 'default') {
-          effectiveSig = APPEND_SIGNATURE ? SIGNATURE : null
-        } else if (sigArg === 'none' || sigArg === '') {
-          effectiveSig = null
-        } else {
-          effectiveSig = sigArg.startsWith('\n') ? sigArg : '\n' + sigArg
-        }
-
-        const access = loadAccess()
-        const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-        const mode = access.chunkMode ?? 'length'
-        const chunks = chunk(text, limit, mode)
-        if (effectiveSig && chunks.length > 0) chunks[chunks.length - 1] += effectiveSig
-        let sent = 0
-
-        for (let i = 0; i < chunks.length; i++) {
-          const err = sendText(chat_id, chunks[i])
-          if (err) throw new Error(`chunk ${i + 1}/${chunks.length} failed (${sent} sent ok): ${err}`)
-          sent++
-        }
-        for (const f of files) {
-          const err = sendAttachment(chat_id, f)
-          if (err) throw new Error(`attachment ${basename(f)} failed (${sent} sent ok): ${err}`)
-          sent++
-        }
-
+        const { sent } = performSend({ chat_id, text, files, signature: sigArg })
         return { content: [{ type: 'text', text: sent === 1 ? 'sent' : `sent ${sent} parts` }] }
       }
       case 'chat_messages': {
@@ -1674,66 +1961,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const msgLimit = Math.min(Math.max(1, (args.messages as number) ?? 20), 100)
         const exLimit = Math.min(Math.max(0, (args.examples as number) ?? 5), 50)
         const lookback = Math.min(Math.max(1, (args.lookback_hours as number) ?? 168), 720)
-
-        const prefs = readPreferences()
-        const info = qChatInfo.get(guid)
-        const participants = qChatParticipants.all(guid).map(p => p.id)
-        const kind = info?.style === 43 ? 'group' : 'dm'
-        const primaryContact = kind === 'dm' && participants.length > 0 ? participants[0] : null
-
-        const sinceNs = toAppleNs(Date.now() - lookback * 3600 * 1000)
-        const stats = qThreadStats.get(guid, sinceNs) ?? { inbound: 0, outbound: 0 }
-        const rows = qHistory.all(guid, msgLimit).reverse()
-        const renderedThread = rows.length === 0 ? '(no messages)' : renderConversation(guid, rows)
-        const lastInbound = [...rows].reverse().find(r => r.is_from_me === 0) ?? null
-        const unreplied = rows.length > 0 ? rows[rows.length - 1]!.is_from_me === 0 : false
-
-        const tone = prefs.defaultTone ?? 'neutral'
-        const globalCustom = prefs.customInstructions?.trim() ?? ''
-        const contactCustom = primaryContact
-          ? (prefs.customInstructionsPerContact?.[primaryContact]?.trim() ?? '')
-          : ''
-        const contactNotes = primaryContact ? (readContactStyle(primaryContact) ?? '').trim() : ''
-        const globalStyle = (readTextSafe(resolveGlobalStyleFile()) ?? '').trim()
-        const approvedExamples = exLimit > 0 ? readApprovedExamples(exLimit, primaryContact ?? undefined) : []
-
-        // Signature resolution: per-contact override trumps the env default.
-        const sigPerContact = primaryContact ? prefs.signaturePerContact?.[primaryContact] : undefined
-        const signatureEnabled = sigPerContact ?? APPEND_SIGNATURE
-        const signatureText = signatureEnabled ? SIGNATURE : null
-
-        const ctx = {
-          chat_guid: guid,
-          kind,
-          participants,
-          primary_contact: primaryContact,
-          unreplied,
-          last_inbound: lastInbound ? {
-            ts: appleDate(lastInbound.date).toISOString(),
-            from: lastInbound.handle_id ?? 'unknown',
-          } : null,
-          activity: {
-            window_hours: lookback,
-            inbound: stats.inbound ?? 0,
-            outbound: stats.outbound ?? 0,
-          },
-          drafting_context: {
-            tone,
-            custom_instructions: globalCustom || null,
-            contact_custom_instructions: contactCustom || null,
-            contact_style_notes: contactNotes || null,
-            global_style_profile: globalStyle || null,
-          },
-          signature: {
-            enabled_by_default: signatureEnabled,
-            default_text: signatureText,
-            note: 'Operator must still pick keep/change/remove before sending; pass via reply(signature=...).',
-          },
-          recent_thread: renderedThread,
-          approved_examples: approvedExamples,
-          reminder: 'Produce 3 reply options (safest, warm, shortest) and WAIT for explicit operator approval. Do not call reply() without explicit send/edit/new instruction from the operator.',
-        }
-
+        const ctx = buildDraftReplyContext(guid, msgLimit, exLimit, lookback)
         return { content: [{ type: 'text', text: JSON.stringify(ctx, null, 2) }] }
       }
       case 'pause': {
@@ -1924,6 +2152,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         log('info', 'memory_replaced', { target: 'contact', contact, path: written })
         return { content: [{ type: 'text', text: `replaced ${written}` }] }
       }
+      case 'bridge_status': {
+        return { content: [{ type: 'text', text: JSON.stringify(bridgeStatus(), null, 2) }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -1941,6 +2172,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
+// Phase 6: optional LAN bridge for the ReplyPilot iOS companion. Gated by
+// `preferences.bridgeEnabled`; no-ops when unset. Errors during startup are
+// logged and swallowed so a misconfigured bridge never blocks the MCP loop.
+try { startBridge() } catch (err) {
+  log('warn', 'bridge_start_failed', { error: err instanceof Error ? err.message : String(err) })
+}
+
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
 // the poll interval keeps the process alive forever as a zombie holding the
 // chat.db handle open.
@@ -1949,6 +2187,7 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   process.stderr.write('imessage channel: shutting down\n')
+  try { stopBridge() } catch {}
   try { db.close() } catch {}
   process.exit(0)
 }

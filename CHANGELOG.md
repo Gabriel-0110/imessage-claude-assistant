@@ -4,6 +4,26 @@
 
 ### Added
 
+- **LAN bridge for the ReplyPilot iOS companion (Phase 6)** — when
+  `preferences.bridgeEnabled` is `true`, the server spins up an HTTP
+  listener on `0.0.0.0:7842` (override with `IMESSAGE_BRIDGE_PORT`)
+  alongside the stdio MCP transport. Every request is gated by
+  `Authorization: Bearer <bridgeToken>`; tokens auto-generate as
+  32-byte hex and persist to `preferences.json` on first start. The
+  service is advertised on the local network via Bonjour/mDNS using
+  macOS `dns-sd` (`_replypilot._tcp.`). Endpoints: `GET /v1/health`,
+  `GET /v1/pending`, `GET /v1/draft?chat_guid=…`, `POST /v1/reply`.
+  Sends route through the same `performSend` path as the `reply` MCP
+  tool (allowlist, chunking, signature resolution identical).
+  Attachments are explicitly rejected in v1. The bridge does NOT
+  auto-send drafts — an iOS client tapping "send" IS the operator
+  approval event for that exact text. No TLS in v1 (LAN + token
+  threat model); `bridgeToken` still lives in `preferences.json`
+  with Keychain migration as a follow-up.
+- `bridge_status` MCP tool — read-only report of the bridge state:
+  `enabled_preference`, `running`, bound `port`, Bonjour subprocess
+  liveness, `uptime_ms`, and the last 8 chars of the bearer token
+  for out-of-band pairing verification.
 - `schedule_reply` MCP tool — queue a drafted reply for re-presentation
   at a chosen ISO-8601 timestamp. Entries persist to
   `$STATE_DIR/scheduled.json`. The queue ONLY delays presentation; it
@@ -27,6 +47,17 @@
 
 ### Changed
 
+- `preferences.bridgeEnabled` / `preferences.bridgeToken` are now
+  wired to the runtime. `bridgeEnabled` toggles the Phase 6 LAN
+  server + Bonjour advertisement; `bridgeToken` is the shared secret.
+  If the operator flips `bridgeEnabled` to `true` without setting a
+  token, one is auto-generated and written back. Disabling requires
+  a server restart to tear down the listener.
+- Extracted `performSend` from the `reply` tool so the LAN bridge and
+  MCP surface share one code path for allowlist, attachment, chunking,
+  and signature resolution. No behaviour change for existing callers.
+- Extracted `buildDraftReplyContext` from the `draft_reply` tool for
+  the same reason. No behaviour change for existing callers.
 - `preferences.memoryPath` is now wired: when set, it overrides the
   default `~/.claude/imessage-style-profile.md` path for both
   `style_profile` / `draft_reply` reads and `memory_editor`

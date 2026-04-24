@@ -37,7 +37,8 @@ Arguments passed: `$ARGUMENTS`
 | `denyFrom` | string[] | `[]` | reserved (phase 2) | Senders always dropped before the allowlist check. Handles lowercased. |
 | `memoryPath` | string | unset | reserved (phase 5) | Override for style directory; must live under `$HOME`. |
 | `schedulerEnabled` | boolean | `false` | reserved (phase 5) | Enables scheduled-send queue processing. |
-| `bridgeEnabled` | boolean | `false` | reserved (Bridge phase) | Starts the LAN Bonjour service for the ReplyPilot iOS companion. |
+| `bridgeEnabled` | boolean | `false` | active (phase 6) | Starts the LAN HTTP bridge + Bonjour service for the ReplyPilot iOS companion. Requires server restart to take effect. |
+| `bridgeToken` | string | auto | active (phase 6) | Bearer token for bridge auth. Auto-generated (32-byte hex) on first bridge start if unset. Rotate by editing `preferences.json` and restarting. |
 
 **Reserved** = the field is validated and stored, but the runtime does not
 yet consult it. Setting it now is safe; it will take effect when the

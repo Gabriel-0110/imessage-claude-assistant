@@ -24,6 +24,7 @@ choice, see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `list_scheduled` | List queue entries (`status`, `due_only`, `chat_guid` filters). Annotates entries with a derived `due` flag. | no |
 | `cancel_scheduled` | Flip a queued entry to `status: cancelled` (retained for audit) | writes `scheduled.json` |
 | `memory_editor` | Read / append / replace global style profile or per-contact style notes. Writes gated by `styleLearningEnabled`; global target honours `memoryPath`. | writes style markdown files |
+| `bridge_status` | Read-only report of the Phase 6 LAN bridge (`enabled_preference`, `running`, bound `port`, Bonjour liveness, `uptime_ms`, token fingerprint) | no |
 | `health_check` | Self-diagnostic: DB, state dir, policy, watermark, etc. | no |
 
 All read tools are scoped to **allowlisted chats only** — messages from
@@ -108,6 +109,15 @@ Local-only state under `~/.claude/channels/imessage/style/`:
     operator approval of the exact text at re-presentation time — the
     scheduler only delays presentation, it does not pre-authorize
     sending.
+  - `bridgeEnabled` (default `false`) gates the Phase 6 LAN bridge for
+    the ReplyPilot iOS companion. Requires a restart to take effect —
+    the listener and Bonjour advertisement are brought up at startup
+    only.
+  - `bridgeToken` (optional string, ≥32 chars) is the Bearer secret
+    for bridge requests. When `bridgeEnabled` becomes `true` and this
+    field is unset, the server generates a 32-byte hex token and
+    writes it back to `preferences.json` (follow-up: migrate to
+    Keychain). Rotating the token requires a restart.
 
 In addition, `~/.claude/channels/imessage/scheduled.json` stores queued
 `schedule_reply` entries. Each entry carries `id`, `chat_guid`, `text`,
@@ -121,6 +131,44 @@ voice summary (see `CLAUDE.md`).
 Design principle: **style memory is never updated from inbound message
 content**. Only the operator's direct terminal approval can trigger a
 write. This prevents prompt injection from warping the assistant's voice.
+
+## LAN bridge (ReplyPilot iOS companion, Phase 6)
+
+When `preferences.bridgeEnabled` is `true`, the server runs a small HTTP
+listener alongside the stdio MCP transport so a paired client (planned:
+an iOS app on the same Wi-Fi) can surface pending threads and send
+approved replies.
+
+- **Bind**: `0.0.0.0:7842`. Override the port with `IMESSAGE_BRIDGE_PORT`.
+- **Auth**: `Authorization: Bearer <bridgeToken>` on every request;
+  constant-time compared. Auto-generated on first start if unset.
+- **Discovery**: Bonjour/mDNS `_replypilot._tcp.` advertised via macOS
+  `dns-sd` (spawned as a child process so there is no new runtime
+  dependency).
+- **Endpoints**:
+  - `GET /v1/health` — service liveness, bound port, uptime.
+  - `GET /v1/pending?lookback_hours=48&max=20` — overview of unanswered
+    allowlisted threads (same shape as `pending_replies`). Caps:
+    `lookback_hours ≤ 720`, `max ≤ 100`.
+  - `GET /v1/draft?chat_guid=…` — same drafting context as the
+    `draft_reply` MCP tool (recent thread, tone, custom instructions,
+    approved examples, signature defaults). Chat must be allowlisted.
+  - `POST /v1/reply` — JSON body `{chat_guid, text, signature?}`.
+    Goes through the shared `performSend` path (same allowlist,
+    chunking, signature resolution as the MCP `reply` tool).
+    Attachments are rejected in v1.
+- **Invariant**: the bridge does **not** auto-send drafts. The client
+  tapping "send" is the operator's approval event for the exact text
+  being posted. Scheduling, auto-reply, and draft-return-without-send
+  are all still enforced server-side the same way.
+- **Threat model (v1)**: LAN-scoped + bearer token. No TLS, no mTLS.
+  Tokens live in `preferences.json` for now; Keychain migration is a
+  planned follow-up. Rotate the token by editing `preferences.json`
+  and restarting.
+- **Inspection**: call the `bridge_status` MCP tool for runtime state
+  (enabled preference, whether the listener is up, bound port,
+  Bonjour subprocess liveness, uptime, and the last 8 chars of the
+  token for out-of-band pairing verification).
 
 ## Observability
 
