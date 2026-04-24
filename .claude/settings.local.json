@@ -9,5 +9,9 @@
       "Skill(imessage:access)",
       "mcp__plugin_imessage_imessage__edit_preferences"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "imessage"
+  ]
 }

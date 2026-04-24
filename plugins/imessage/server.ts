@@ -1186,7 +1186,7 @@ function advertiseBonjour(port: number): void {
 function startBridge(): void {
   if (bridgeServer) return
   const prefs = readPreferences()
-  if (prefs.bridgeEnabled !== true) return
+  if (prefs.bridgeEnabled !== true && process.env.IMESSAGE_BRIDGE_ENABLED !== '1') return
   const token = ensureBridgeToken()
   const envPort = parseInt(process.env.IMESSAGE_BRIDGE_PORT ?? '', 10)
   const port = Number.isFinite(envPort) && envPort > 0 ? envPort : BRIDGE_DEFAULT_PORT

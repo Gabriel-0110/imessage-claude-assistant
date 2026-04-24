@@ -30,7 +30,7 @@ LOG_FILE="$REPO_ROOT/state/service.log"
 exec /usr/bin/expect <<EOF >> "$LOG_FILE" 2>&1
 log_user 1
 set timeout -1
-spawn $CLAUDE_BIN --dangerously-load-development-channels plugin:imessage@gabriel-local-plugins
+spawn $CLAUDE_BIN --debug mcp --debug-file $REPO_ROOT/state/claude-debug.log --dangerously-load-development-channels plugin:imessage@gabriel-local-plugins
 expect {
   -regexp {Enter.*confirm} {
     send "1\r"
@@ -38,5 +38,5 @@ expect {
   }
   -regexp {Listening for channel messages from:} {}
 }
-interact
+expect eof
 EOF

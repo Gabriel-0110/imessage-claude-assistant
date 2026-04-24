@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "imessage": {
+      "command": "/Users/gabrielchiappa/.bun/bin/bun",
+      "args": [
+        "/Users/gabrielchiappa/Coding/imessage-claude-assistant/plugins/imessage/server.ts"
+      ]
+    }
+  }
+}

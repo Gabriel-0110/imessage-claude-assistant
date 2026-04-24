@@ -6,6 +6,9 @@
     __REPO_ROOT__ -> absolute path to this repository
     __HOME__      -> $HOME
     __LABEL__     -> LaunchAgent label (defaults to com.gabriel.imessage-claude)
+
+  This plist runs the bun iMessage bridge server directly.
+  The menubar app (macos/iMessageAssistant/) provides the UI.
 -->
 <plist version="1.0">
   <dict>
@@ -14,7 +17,11 @@
 
     <key>ProgramArguments</key>
     <array>
-      <string>__REPO_ROOT__/scripts/start-imessage-claude-service.sh</string>
+      <string>__HOME__/.bun/bin/bun</string>
+      <string>run</string>
+      <string>--cwd</string>
+      <string>__REPO_ROOT__/plugins/imessage</string>
+      <string>start</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -34,10 +41,12 @@
 
     <key>EnvironmentVariables</key>
     <dict>
-      <key>PATH</key>
-      <string>__HOME__/.local/bin:__HOME__/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
       <key>HOME</key>
       <string>__HOME__</string>
+      <key>PATH</key>
+      <string>__HOME__/.bun/bin:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+      <key>IMESSAGE_BRIDGE_ENABLED</key>
+      <string>1</string>
     </dict>
   </dict>
 </plist>

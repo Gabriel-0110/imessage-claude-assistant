@@ -17,11 +17,25 @@ alone will fail with an allowlist warning. When prompted, choose:
 
 ## Permission requirements
 
-The iMessage plugin reads the local Messages database (chat.db), so the terminal
-app that launches Claude Code needs Full Disk Access.
+The iMessage plugin reads the local Messages database (chat.db). Two scenarios:
+
+**Running Claude interactively** — grant Full Disk Access to your terminal app
+(Terminal, iTerm2, VS Code, etc.) in System Settings → Privacy & Security →
+Full Disk Access.
+
+**Running via the LaunchAgent service** — the launchd process does not inherit
+your terminal's Full Disk Access. You must grant Full Disk Access directly to
+the bun binary:
+
+1. Open **System Settings → Privacy & Security → Full Disk Access**
+2. Click **"+"** (unlock first if needed)
+3. Press **Cmd+Shift+G** and navigate to `~/.bun/bin/`
+4. Select **`bun`** and click Open
+5. Ensure the toggle is enabled
+6. Restart the service: `launchctl kickstart -k gui/$(id -u)/com.gabriel.imessage-claude`
 
 The first outbound reply may also trigger an Automation permission prompt so the
-terminal app can control Messages.
+terminal app (or the LaunchAgent's process) can control Messages.
 
 ## Testing
 
