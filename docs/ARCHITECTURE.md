@@ -89,6 +89,7 @@ flowchart TB
 ```
 
 Key rules:
+
 - Only **terminal input** authorizes sending, style-log writes, or access
   mutations.
 - Inbound message content is treated as untrusted — it may contain prompt
@@ -108,6 +109,7 @@ Key rules:
 ## Extension points
 
 Adding a new tool:
+
 1. Add an entry to the `ListToolsRequestSchema` handler.
 2. Add a `case` in the `CallToolRequestSchema` switch.
 3. If the tool reads new tables, add a prepared `db.query<...>(...)`

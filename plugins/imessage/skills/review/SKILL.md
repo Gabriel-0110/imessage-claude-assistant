@@ -29,18 +29,22 @@ Arguments: `$ARGUMENTS`
 Parse the first whitespace-separated token.
 
 ### No args → overview
+
 1. Call `pending_replies` with `lookback_hours: 48`.
 2. If empty, call `recent_chats` with `lookback_hours: 48` and summarize the 5 most recent.
 3. Present a numbered list. For each thread show: label (DM/Group + participants), `chat_id`, last message preview, relative age, and an `⚠ unreplied` tag where applicable.
 4. Ask: *"Which thread do you want to review? (number, `all`, or a chat_id)"*
 
 ### `pending` → awaiting-reply list only
+
 Call `pending_replies` (default window 48h). Print the list. Do not draft.
 
 ### `recent [hours]` → activity overview
+
 Call `recent_chats` with `lookback_hours: <hours>` (default 48). Print. Do not draft.
 
 ### `<chat_id or contact handle>` → drill in
+
 1. If the argument looks like a phone/email handle rather than a chat GUID, first call `recent_chats` and resolve the handle to the most recent matching `chat_id`. If ambiguous, list candidates and ask which.
 2. Call `thread_summary` with that `chat_guid` and `limit: 40`.
 3. Call `style_profile` with the contact handle for voice guidance.

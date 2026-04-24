@@ -1,0 +1,8 @@
+---
+# Disable overly strict rules for prose markdown
+config:
+  MD013: false        # line-length — not practical for prose
+globs:
+  - "**/*.md"
+ignores:
+  - "**/node_modules/**"

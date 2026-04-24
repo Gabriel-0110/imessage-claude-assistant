@@ -33,7 +33,7 @@ The server identifies your addresses at boot by reading `message.account` and `c
 | `pairing` | Reply with a pairing code, drop the message. Every contact who texts this Mac will receive one; only use this if very few people have the number. |
 | `disabled` | Deliver all DMs without approval or pairing. |
 
-```
+```text
 /imessage:access policy pairing
 ```
 
@@ -48,7 +48,7 @@ iMessage identifies senders by **handle addresses**: either a phone number in `+
 
 If the exact form is unclear, check the `chat_messages` tool output or (under `pairing` policy) the pending entry in `access.json`.
 
-```
+```text
 /imessage:access allow +15551234567
 /imessage:access allow friend@icloud.com
 /imessage:access remove +15551234567
@@ -60,7 +60,7 @@ Groups are off by default. Opt each one in individually, keyed on the chat GUID.
 
 Chat GUIDs look like `iMessage;+;chat123456789012345678`. They're not exposed in Messages.app; get them from the `chat_id` field in `chat_messages` tool output or from the server's stderr log when it drops a group message.
 
-```
+```text
 /imessage:access group add "iMessage;+;chat123456789012345678"
 ```
 
@@ -68,13 +68,13 @@ Quote the GUID; the semicolons are shell metacharacters.
 
 iMessage has **no structured @mentions**. The `@Name` highlight in group chats is presentational styling — nothing in `chat.db` marks it as a mention. With the default `requireMention: true`, the only trigger is a `mentionPatterns` regex match. Set at least one pattern before opting a group in, or no message will ever match.
 
-```
+```text
 /imessage:access set mentionPatterns '["^claude\\b", "@assistant"]'
 ```
 
 Pass `--no-mention` to process every message in the group, or `--allow addr1,addr2` to restrict which members can trigger it.
 
-```
+```text
 /imessage:access group add "iMessage;+;chat123456789012345678" --no-mention
 /imessage:access group add "iMessage;+;chat123456789012345678" --allow +15551234567,friend@icloud.com
 /imessage:access group rm "iMessage;+;chat123456789012345678"

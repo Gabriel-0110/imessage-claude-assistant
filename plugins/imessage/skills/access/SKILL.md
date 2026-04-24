@@ -53,9 +53,9 @@ here — it would autoreply a code to every contact who texts. `disabled`
 delivers all DMs without approval or pairing. Self-chat bypasses the gate
 regardless of policy, so the owner's own texts always get through.
 
-Sender IDs are handle addresses (email or phone number, e.g. "+15551234567"
-or "user@example.com"). Chat IDs are iMessage chat GUIDs (e.g.
-"iMessage;-;+15551234567") — they differ from sender IDs.
+Sender IDs are handle addresses (email or phone number, e.g. `+15551234567`
+or `user@example.com`). Chat IDs are iMessage chat GUIDs (e.g.
+`iMessage;-;+15551234567`) — they differ from sender IDs.
 
 ---
 
@@ -121,6 +121,7 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 ### `set <key> <value>`
 
 Delivery config. Supported keys:
+
 - `textChunkLimit`: number — split replies longer than this (max 10000)
 - `chunkMode`: `length` | `newline` — hard cut vs paragraph-preferring
 - `mentionPatterns`: JSON array of regex strings — iMessage has no structured mentions, so this is the only trigger in groups

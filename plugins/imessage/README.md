@@ -5,6 +5,7 @@ Connect iMessage to your Claude Code assistant. Reads `~/Library/Messages/chat.d
 macOS only.
 
 ## Quick setup
+
 > Default: text yourself. Other senders are dropped silently (no auto-reply) until you allowlist them. See [ACCESS.md](./ACCESS.md) for groups and multi-user setups.
 
 **1. Grant Full Disk Access.**
@@ -18,7 +19,8 @@ If you click Don't Allow, or the prompt never appears, grant it manually: **Syst
 These are Claude Code commands — run `claude` to start a session first.
 
 Install the local plugin. No env vars required.
-``` 
+
+```text
 /plugin install imessage@gabriel-local-plugins
 ```
 
@@ -45,7 +47,7 @@ iMessage yourself from any device. It reaches the assistant immediately — self
 
 Nobody else's texts reach the assistant until you add their handle:
 
-```
+```text
 /imessage:access allow +15551234567
 ```
 

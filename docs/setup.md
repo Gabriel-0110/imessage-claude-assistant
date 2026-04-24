@@ -1,22 +1,30 @@
 # Setup notes
 
 ## Local install
+
 Inside Claude Code:
+
     /plugin install imessage@gabriel-local-plugins
 
 Then restart Claude Code with:
+
     claude --dangerously-load-development-channels plugin:imessage@gabriel-local-plugins
 
 Because this is a local fork rather than an approved marketplace channel, `--channels`
 alone will fail with an allowlist warning. When prompted, choose:
+
     1. I am using this for local development
 
 ## Permission requirements
-The iMessage plugin reads the local Messages database (chat.db), so the terminal app that launches Claude Code needs Full Disk Access.
 
-The first outbound reply may also trigger an Automation permission prompt so the terminal app can control Messages.
+The iMessage plugin reads the local Messages database (chat.db), so the terminal
+app that launches Claude Code needs Full Disk Access.
+
+The first outbound reply may also trigger an Automation permission prompt so the
+terminal app can control Messages.
 
 ## Testing
+
 1. Start Claude with the iMessage channel enabled.
 2. Text yourself from your iPhone.
 3. Confirm the message appears in Claude.
@@ -24,7 +32,9 @@ The first outbound reply may also trigger an Automation permission prompt so the
 5. Approve, edit, or replace the reply before sending.
 
 ## Access control
-This local plugin supports self-chat, allowlists, pairing, and a custom `disabled` mode that delivers all DMs without approval or pairing.
+
+This local plugin supports self-chat, allowlists, pairing, and a custom `disabled`
+mode that delivers all DMs without approval or pairing.
 
 ## Diagnostics
 

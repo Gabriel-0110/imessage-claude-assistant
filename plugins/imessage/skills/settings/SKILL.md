@@ -71,6 +71,7 @@ as-is — the tool validates. Call
 the relevant section of status.
 
 Examples:
+
 - `set defaultTone warm`
 - `set styleLearningEnabled false`
 - `set visionEnabled true`
