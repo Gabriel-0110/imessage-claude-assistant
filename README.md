@@ -238,7 +238,7 @@ imessage-claude-assistant/
 │   └── com.gabriel.imessage-claude.plist   LaunchAgent template
 ├── plugins/
 │   └── imessage/               The MCP plugin (see plugin README)
-│       ├── package.json              Bun package; version 0.2.0
+│       ├── package.json              Bun package; version 0.9.0
 │       ├── server.ts                 Single-file MCP server
 │       ├── .mcp.json                 MCP launcher config (absolute paths)
 │       ├── .claude-plugin/plugin.json

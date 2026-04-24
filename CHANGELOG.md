@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_No changes yet._
+
+## 0.9.0 — 2026-04-23
+
 ### Added
 
 - **LAN bridge for the ReplyPilot iOS companion (Phase 6)** — when
