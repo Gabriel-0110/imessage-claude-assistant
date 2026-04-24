@@ -2,7 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- `schedule_reply` MCP tool — queue a drafted reply for re-presentation
+  at a chosen ISO-8601 timestamp. Entries persist to
+  `$STATE_DIR/scheduled.json`. The queue ONLY delays presentation; it
+  does NOT pre-authorize sending. When an entry comes due the operator
+  must still explicitly approve the exact text before `reply` is
+  called. Gated by `preferences.schedulerEnabled` (default `false`).
+- `list_scheduled` MCP tool — list queue entries. Filters: `status`
+  (`pending`|`cancelled`|`presented`|`all`, default `pending`),
+  `due_only` (only past-due pending entries), `chat_guid`. Each entry
+  is annotated with a derived `due` flag and a reminder that
+  scheduling does not pre-authorize sending.
+- `cancel_scheduled` MCP tool — flip a queued entry to
+  `status: cancelled`. The entry is retained for audit and no longer
+  surfaces under the default `pending` filter.
+- `memory_editor` MCP tool — read, append to, or replace the
+  operator's style-memory files. `target: "global"` addresses the
+  global iMessage style profile (honours `preferences.memoryPath`
+  when set); `target: "contact"` addresses `style/contacts/<handle>.md`.
+  Writes are gated by `preferences.styleLearningEnabled` (default
+  on); reads always work.
+
 ### Changed
+
+- `preferences.memoryPath` is now wired: when set, it overrides the
+  default `~/.claude/imessage-style-profile.md` path for both
+  `style_profile` / `draft_reply` reads and `memory_editor`
+  global-target writes. Validation (must live under `$HOME`)
+  unchanged.
+- `preferences.schedulerEnabled` is now wired to gate
+  `schedule_reply`. Other scheduling tools (`list_scheduled`,
+  `cancel_scheduled`) remain callable regardless, so operators can
+  inspect or cancel queued entries even after disabling scheduling.
+- `list_contacts` now calls `loadAccess()` (was `readAccess()`, which
+  did not exist — runtime crash on first call, missed by smoke import
+  since the reference lived inside a tool-case closure).
+
+### Previously (v0.7.0)
+
+#### Changed (v0.7.0)
 
 - SMS/RCS inbound gate now consults `preferences.allowSms` before
   falling back to the `IMESSAGE_ALLOW_SMS` env default. Explicit
@@ -51,7 +91,7 @@
   instructions, and any contact-specific custom instructions, so
   drafting calls don't need a separate `edit_preferences get`.
 
-### Added
+#### Added (v0.7.0)
 
 - `pause` MCP tool — suppress inbound channel notifications globally or
   for a single `chat_guid` for a chosen number of minutes (default 60).

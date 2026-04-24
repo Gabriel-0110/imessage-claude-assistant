@@ -19,7 +19,11 @@ choice, see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `resume` | Clear a global or per-chat pause set by `pause` | writes `preferences.json` |
 | `list_contacts` | Read-only audit of DM policy, allowlist, self handles, and group policies | no |
 | `record_approved_reply` | Append an operator-approved reply to the style log (respects `styleLearningEnabled`) | appends JSONL + optional contact note |
-| `edit_preferences` | Read or update operator personalization (tone, signature overrides, denylist, reserved roadmap fields) | writes `preferences.json` |
+| `edit_preferences` | Read or update operator personalization (tone, signature overrides, denylist, roadmap fields) | writes `preferences.json` |
+| `schedule_reply` | Queue a drafted reply for later re-presentation. Only delays presentation — does not pre-authorize sending. Gated by `schedulerEnabled`. | writes `scheduled.json` |
+| `list_scheduled` | List queue entries (`status`, `due_only`, `chat_guid` filters). Annotates entries with a derived `due` flag. | no |
+| `cancel_scheduled` | Flip a queued entry to `status: cancelled` (retained for audit) | writes `scheduled.json` |
+| `memory_editor` | Read / append / replace global style profile or per-contact style notes. Writes gated by `styleLearningEnabled`; global target honours `memoryPath`. | writes style markdown files |
 | `health_check` | Self-diagnostic: DB, state dir, policy, watermark, etc. | no |
 
 All read tools are scoped to **allowlisted chats only** — messages from
@@ -92,6 +96,23 @@ Local-only state under `~/.claude/channels/imessage/style/`:
   - `nsfwFilter: 'tag'` prefixes inbound content with a `[nsfw]`
     banner when a conservative keyword heuristic matches. Message is
     still delivered; the tag is a warning for the drafting surface.
+  - `memoryPath` (optional absolute path under `$HOME`) overrides the
+    default `~/.claude/imessage-style-profile.md` location used by
+    `style_profile`, `draft_reply`, and `memory_editor` for the global
+    style file. Contact notes are unaffected and remain under the
+    channel state dir.
+  - `schedulerEnabled` (default `false`) gates the `schedule_reply`
+    tool. `list_scheduled` / `cancel_scheduled` remain callable when
+    scheduling is disabled so operators can inspect or drop any
+    previously queued entries. Queued entries still require explicit
+    operator approval of the exact text at re-presentation time — the
+    scheduler only delays presentation, it does not pre-authorize
+    sending.
+
+In addition, `~/.claude/channels/imessage/scheduled.json` stores queued
+`schedule_reply` entries. Each entry carries `id`, `chat_guid`, `text`,
+optional `files` / `signature` / `note`, `scheduled_for`, `created_at`,
+and `status` (`pending` | `cancelled` | `presented`).
 
 The global style markdown at `~/.claude/imessage-style-profile.md` is left
 untouched by the server and remains the project-level home for the overall

@@ -35,10 +35,18 @@ For every new incoming iMessage:
 
 When a conversation is active and might continue (e.g., back-and-forth exchange):
 
-- User can pause the assistant with a pause command
-- While paused, do not trigger on new incoming messages
-- Trigger automatically re-enables after 1 hour without any message exchanges in that conversation
-- This lets users have natural ongoing conversations without constant reply suggestions
+- User can pause the assistant with a pause command. Implemented via the
+  `pause` MCP tool: `pause({minutes, chat_guid?})`. Without `chat_guid`
+  it mutes all inbound drafting; with `chat_guid` it mutes just that
+  thread. Clear with `resume({chat_guid?})`.
+- While paused, inbound notifications are silently dropped — messages
+  still land in `chat.db` and are reachable via `chat_messages` /
+  `recent_chats` / `/imessage:review`.
+- Pauses auto-expire at their stored ISO timestamp
+  (`preferences.pauseUntil` globally, `preferences.pausedChats[guid]`
+  per-thread). Default pause window is 60 minutes.
+- Use `list_contacts` for a read-only audit of who can currently reach
+  the assistant (DM policy, allowlist, groups, self handles).
 
 ## Silent behavior
 

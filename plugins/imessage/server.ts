@@ -628,8 +628,8 @@ type Preferences = {
   pauseUntil?: string                                   // phase 4 — ISO timestamp, global pause on inbound notifications
   pausedChats?: Record<string, string>                  // phase 4 — per-chat ISO pause timestamps
   denyFrom?: string[]                                   // phase 2
-  memoryPath?: string                                   // phase 5
-  schedulerEnabled?: boolean                            // phase 5 (default false)
+  memoryPath?: string                                   // phase 5 — overrides GLOBAL_STYLE_FILE path for memory_editor + style reads
+  schedulerEnabled?: boolean                            // phase 5 — gates schedule_reply tool (default false)
   bridgeEnabled?: boolean                               // Bridge phase (default false)
   bridgeToken?: string                                  // Bridge phase — paired-device shared secret (TODO: migrate to Keychain)
 }
@@ -833,6 +833,86 @@ function writeContactStyleAppend(contact: string, note: string): void {
   const prev = readTextSafe(p) ?? `# Contact style notes: ${contact}\n\n`
   const stamped = `${prev.trimEnd()}\n\n- ${new Date().toISOString()} — ${note.replace(/\s+/g, ' ').trim()}\n`
   writeFileSync(p, stamped, { mode: 0o600 })
+}
+
+// Phase 5: resolve the active global-style-profile path. When the operator
+// sets `preferences.memoryPath`, it overrides the default
+// `~/.claude/imessage-style-profile.md` — writes go there and reads
+// prefer it. The validator already confines memoryPath to $HOME.
+function resolveGlobalStyleFile(): string {
+  const prefs = readPreferences()
+  return prefs.memoryPath && prefs.memoryPath.trim()
+    ? (prefs.memoryPath.startsWith('~') ? join(homedir(), prefs.memoryPath.slice(1)) : prefs.memoryPath)
+    : GLOBAL_STYLE_FILE
+}
+
+function writeGlobalStyle(body: string): string {
+  const p = resolveGlobalStyleFile()
+  // Ensure parent dir exists. For the default $HOME/.claude path this is
+  // a no-op on any working Claude Code install; for a custom memoryPath
+  // it creates the folder on first write.
+  try { mkdirSync(join(p, '..'), { recursive: true, mode: 0o700 }) } catch {}
+  const tmp = p + '.tmp'
+  writeFileSync(tmp, body, { mode: 0o600 })
+  renameSync(tmp, p)
+  return p
+}
+
+function appendGlobalStyle(note: string): string {
+  const p = resolveGlobalStyleFile()
+  const prev = readTextSafe(p) ?? `# iMessage style profile\n\n`
+  const stamped = `${prev.trimEnd()}\n\n- ${new Date().toISOString()} — ${note.replace(/\s+/g, ' ').trim()}\n`
+  try { mkdirSync(join(p, '..'), { recursive: true, mode: 0o700 }) } catch {}
+  writeFileSync(p, stamped, { mode: 0o600 })
+  return p
+}
+
+function replaceContactStyle(contact: string, body: string): string {
+  mkdirSync(CONTACTS_DIR, { recursive: true, mode: 0o700 })
+  const p = join(CONTACTS_DIR, sanitizeHandle(contact) + '.md')
+  writeFileSync(p, body, { mode: 0o600 })
+  return p
+}
+
+// --- Phase 5: scheduled-reply queue ------------------------------------------
+// Persistent drafts that Claude should re-present to the operator at (or
+// after) a chosen timestamp. Scheduling does NOT pre-authorize sending —
+// when an entry comes due, the operator must still explicitly approve the
+// exact text before `reply` is called. The queue only delays presentation.
+// Gated by `preferences.schedulerEnabled` (default false); calls to
+// `schedule_reply` fail when the flag is unset.
+
+const SCHEDULED_FILE = join(STATE_DIR, 'scheduled.json')
+
+type ScheduledStatus = 'pending' | 'cancelled' | 'presented'
+
+type ScheduledReply = {
+  id: string
+  chat_guid: string
+  text: string
+  files?: string[]
+  signature?: string
+  scheduled_for: string // ISO-8601
+  created_at: string    // ISO-8601
+  note?: string
+  status: ScheduledStatus
+  presented_at?: string
+}
+
+function readScheduled(): ScheduledReply[] {
+  const raw = readTextSafe(SCHEDULED_FILE)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as { entries?: ScheduledReply[] }
+    return Array.isArray(parsed?.entries) ? parsed.entries : []
+  } catch { return [] }
+}
+
+function writeScheduled(entries: ScheduledReply[]): void {
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  const tmp = SCHEDULED_FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify({ entries }, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, SCHEDULED_FILE)
 }
 
 // --- overview / pending-reply queries ----------------------------------------
@@ -1227,6 +1307,64 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         'List the access-control state in read-only form: allowlisted DM handles, configured groups (with their policies), self-chat handles, and the active DM policy. Useful for "who can currently reach me" audits and for populating UIs. Does not include message bodies.',
       inputSchema: { type: 'object', properties: { format: { type: 'string', enum: ['text', 'json'] } } },
     },
+    {
+      name: 'schedule_reply',
+      description:
+        'Queue a drafted reply for later presentation. The queue only DELAYS presentation — it does NOT pre-authorize sending. When an entry comes due, Claude must re-present the exact text to the operator and obtain explicit approval before calling reply(). Requires preferences.schedulerEnabled = true. Returns the created entry with its id.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_guid: { type: 'string', description: 'Target chat (must be allowlisted).' },
+          text: { type: 'string', description: 'The drafted reply text to re-present later.' },
+          scheduled_for: { type: 'string', description: 'ISO-8601 timestamp when the draft should be re-presented.' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Optional attachment paths to carry with the draft.' },
+          signature: { type: 'string', description: 'Optional per-send signature choice carried into the eventual reply() call ("default"|"none"|custom string).' },
+          note: { type: 'string', description: 'Optional short note describing why the reply is scheduled (e.g. "after their meeting").' },
+        },
+        required: ['chat_guid', 'text', 'scheduled_for'],
+      },
+    },
+    {
+      name: 'list_scheduled',
+      description:
+        'List scheduled-reply queue entries. By default returns pending entries; pass status to filter, or due_only:true to return only entries whose scheduled_for has passed. Read-only. Entries are presentation reminders — operator approval is still required before reply() is called.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['pending', 'cancelled', 'presented', 'all'], description: 'Filter by status (default pending).' },
+          due_only: { type: 'boolean', description: 'Only include pending entries whose scheduled_for is in the past.' },
+          chat_guid: { type: 'string', description: 'Optional — scope to one thread.' },
+          format: { type: 'string', enum: ['text', 'json'] },
+        },
+      },
+    },
+    {
+      name: 'cancel_scheduled',
+      description:
+        'Cancel a queued scheduled reply by id. The entry is flipped to status "cancelled" (retained for audit); it will not be surfaced by list_scheduled unless status=all|cancelled is passed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Entry id returned by schedule_reply or list_scheduled.' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'memory_editor',
+      description:
+        'Read, append to, or replace the operator\'s style-memory files. target:"global" addresses the global iMessage style profile (honours preferences.memoryPath if set); target:"contact" addresses the per-contact notes file under style/contacts/<handle>.md. action "read" returns the current content; "append" adds a timestamped bullet; "replace" overwrites the entire file. Writes are gated by preferences.styleLearningEnabled (default on) — when disabled, writes are rejected and reads still work.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          target: { type: 'string', enum: ['global', 'contact'] },
+          contact: { type: 'string', description: 'Required when target="contact".' },
+          action: { type: 'string', enum: ['read', 'append', 'replace'] },
+          text: { type: 'string', description: 'Required for append/replace. For append, a short note; for replace, the full new body.' },
+        },
+        required: ['target', 'action'],
+      },
+    },
   ],
 }))
 
@@ -1362,7 +1500,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'style_profile': {
         const contact = args.contact as string | undefined
         const nExamples = Math.min(Math.max(0, (args.examples as number) ?? 10), 100)
-        const global = readTextSafe(GLOBAL_STYLE_FILE)
+        const styleFile = resolveGlobalStyleFile()
+        const global = readTextSafe(styleFile)
         const contactProfile = contact ? readContactStyle(contact) : null
         const prefs = readPreferences()
         const examples = readApprovedExamples(nExamples, contact)
@@ -1383,7 +1522,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             ? `contact_custom_instructions: ${contactCustom}`
             : 'contact_custom_instructions: (none)')
         }
-        parts.push(`\n=== global style profile (${GLOBAL_STYLE_FILE}) ===`)
+        parts.push(`\n=== global style profile (${styleFile}) ===`)
         parts.push(global ? global.trim() : '(no global style profile yet)')
         if (contact) {
           parts.push(`\n=== contact profile (${contact}) ===`)
@@ -1555,7 +1694,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           ? (prefs.customInstructionsPerContact?.[primaryContact]?.trim() ?? '')
           : ''
         const contactNotes = primaryContact ? (readContactStyle(primaryContact) ?? '').trim() : ''
-        const globalStyle = (readTextSafe(GLOBAL_STYLE_FILE) ?? '').trim()
+        const globalStyle = (readTextSafe(resolveGlobalStyleFile()) ?? '').trim()
         const approvedExamples = exLimit > 0 ? readApprovedExamples(exLimit, primaryContact ?? undefined) : []
 
         // Signature resolution: per-contact override trumps the env default.
@@ -1624,7 +1763,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: 'resumed all inbound' }] }
       }
       case 'list_contacts': {
-        const access = readAccess()
+        const access = loadAccess()
         const format = (args.format as string) === 'json' ? 'json' : 'text'
         const summary = {
           dm_policy: access.dmPolicy,
@@ -1652,6 +1791,138 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           lines.push('groups: (none)')
         }
         return { content: [{ type: 'text', text: lines.join('\n') }] }
+      }
+      case 'schedule_reply': {
+        const prefs = readPreferences()
+        if (prefs.schedulerEnabled !== true) {
+          throw new Error('schedulerEnabled is off — enable via edit_preferences {set:{schedulerEnabled:true}} first')
+        }
+        const chat_id = args.chat_guid as string
+        const text = args.text as string
+        const scheduled_for = args.scheduled_for as string
+        if (!chat_id) throw new Error('chat_guid is required')
+        if (!text || !text.trim()) throw new Error('text is required')
+        if (!scheduled_for) throw new Error('scheduled_for is required (ISO-8601)')
+        const when = Date.parse(scheduled_for)
+        if (!Number.isFinite(when)) throw new Error('scheduled_for must parse as a date')
+        if (!allowedChatGuids().has(chat_id)) {
+          throw new Error(`chat ${chat_id} is not allowlisted — add via /imessage:access`)
+        }
+        const files = Array.isArray(args.files) ? (args.files as unknown[]).filter(x => typeof x === 'string') as string[] : undefined
+        if (files) {
+          for (const f of files) assertSendable(f)
+        }
+        const sigArg = args.signature
+        const signature = typeof sigArg === 'string' ? sigArg : undefined
+        const note = typeof args.note === 'string' && (args.note as string).trim() ? (args.note as string).trim() : undefined
+        const entry: ScheduledReply = {
+          id: randomBytes(6).toString('hex'),
+          chat_guid: chat_id,
+          text,
+          files: files && files.length > 0 ? files : undefined,
+          signature,
+          scheduled_for: new Date(when).toISOString(),
+          created_at: new Date().toISOString(),
+          note,
+          status: 'pending',
+        }
+        const list = readScheduled()
+        list.push(entry)
+        writeScheduled(list)
+        log('info', 'scheduled_reply_queued', { id: entry.id, chat_guid: chat_id, scheduled_for: entry.scheduled_for })
+        return { content: [{ type: 'text', text: JSON.stringify({ queued: entry, reminder: 'Queue only delays presentation. When this entry is due, re-present the text and get explicit operator approval before calling reply().' }, null, 2) }] }
+      }
+      case 'list_scheduled': {
+        const statusArg = (args.status as string | undefined) ?? 'pending'
+        const dueOnly = args.due_only === true
+        const chatGuid = typeof args.chat_guid === 'string' ? (args.chat_guid as string) : undefined
+        const format = (args.format as string) === 'json' ? 'json' : 'text'
+        const now = Date.now()
+        const all = readScheduled()
+        let filtered = all
+        if (statusArg !== 'all') filtered = filtered.filter(e => e.status === statusArg)
+        if (chatGuid) filtered = filtered.filter(e => e.chat_guid === chatGuid)
+        if (dueOnly) filtered = filtered.filter(e => e.status === 'pending' && Date.parse(e.scheduled_for) <= now)
+        // Annotate with a derived `due` flag so Claude can spot entries that
+        // are ready for re-presentation without recomputing the timestamp.
+        const annotated = filtered.map(e => ({
+          ...e,
+          due: e.status === 'pending' && Date.parse(e.scheduled_for) <= now,
+        }))
+        if (format === 'json') return { content: [{ type: 'text', text: JSON.stringify(annotated, null, 2) }] }
+        if (annotated.length === 0) {
+          return { content: [{ type: 'text', text: `(no scheduled entries matching filters)` }] }
+        }
+        const lines: string[] = []
+        lines.push(`${annotated.length} entry(s) (status=${statusArg}${dueOnly ? ', due_only' : ''}):`)
+        for (const e of annotated) {
+          const tag = e.due ? '🕰 DUE' : e.status
+          const preview = e.text.length > 80 ? e.text.slice(0, 77) + '…' : e.text
+          lines.push(`• [${e.id}] ${tag} — ${e.chat_guid} — scheduled_for ${e.scheduled_for}`)
+          lines.push(`    text: ${preview.replace(/[\r\n]+/g, ' ⏎ ')}`)
+          if (e.note) lines.push(`    note: ${e.note}`)
+        }
+        lines.push(`\nReminder: scheduling does not pre-authorize sending. Operator must approve the exact text when you re-present it.`)
+        return { content: [{ type: 'text', text: lines.join('\n') }] }
+      }
+      case 'cancel_scheduled': {
+        const id = args.id as string
+        if (!id) throw new Error('id is required')
+        const list = readScheduled()
+        const target = list.find(e => e.id === id)
+        if (!target) throw new Error(`no scheduled entry with id ${id}`)
+        if (target.status !== 'pending') {
+          return { content: [{ type: 'text', text: `entry ${id} is already ${target.status}` }] }
+        }
+        target.status = 'cancelled'
+        writeScheduled(list)
+        log('info', 'scheduled_reply_cancelled', { id })
+        return { content: [{ type: 'text', text: `cancelled scheduled entry ${id}` }] }
+      }
+      case 'memory_editor': {
+        const target = args.target as string
+        const action = args.action as string
+        const contact = typeof args.contact === 'string' ? (args.contact as string).trim() : ''
+        const text = typeof args.text === 'string' ? (args.text as string) : ''
+        if (target !== 'global' && target !== 'contact') throw new Error('target must be "global" or "contact"')
+        if (!['read', 'append', 'replace'].includes(action)) throw new Error('action must be read|append|replace')
+        if (target === 'contact' && !contact) throw new Error('contact is required when target="contact"')
+        const prefs = readPreferences()
+        if (action !== 'read' && prefs.styleLearningEnabled === false) {
+          throw new Error('styleLearningEnabled is off — memory writes are disabled')
+        }
+        if ((action === 'append' || action === 'replace') && !text.trim()) {
+          throw new Error('text is required for append/replace')
+        }
+        if (target === 'global') {
+          const p = resolveGlobalStyleFile()
+          if (action === 'read') {
+            const body = readTextSafe(p) ?? ''
+            return { content: [{ type: 'text', text: `=== ${p} ===\n${body || '(empty)'}` }] }
+          }
+          if (action === 'append') {
+            const written = appendGlobalStyle(text)
+            log('info', 'memory_appended', { target: 'global', path: written })
+            return { content: [{ type: 'text', text: `appended to ${written}` }] }
+          }
+          const written = writeGlobalStyle(text)
+          log('info', 'memory_replaced', { target: 'global', path: written })
+          return { content: [{ type: 'text', text: `replaced ${written}` }] }
+        }
+        // target === 'contact'
+        const path = join(CONTACTS_DIR, sanitizeHandle(contact) + '.md')
+        if (action === 'read') {
+          const body = readContactStyle(contact) ?? ''
+          return { content: [{ type: 'text', text: `=== ${path} ===\n${body || '(empty)'}` }] }
+        }
+        if (action === 'append') {
+          writeContactStyleAppend(contact, text)
+          log('info', 'memory_appended', { target: 'contact', contact, path })
+          return { content: [{ type: 'text', text: `appended to ${path}` }] }
+        }
+        const written = replaceContactStyle(contact, text)
+        log('info', 'memory_replaced', { target: 'contact', contact, path: written })
+        return { content: [{ type: 'text', text: `replaced ${written}` }] }
       }
       default:
         return {
