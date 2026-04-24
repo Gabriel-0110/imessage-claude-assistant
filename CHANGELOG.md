@@ -17,6 +17,18 @@
 
 ### Added
 
+- `edit_preferences` MCP tool and `/imessage:settings` skill for
+  managing operator personalization in
+  `~/.claude/channels/imessage/style/preferences.json` without
+  hand-editing JSON. The `Preferences` schema gained reserved
+  storage-only fields for upcoming phases (`customInstructions`,
+  `customInstructionsPerContact`, `styleLearningEnabled`,
+  `visionEnabled`, `nsfwFilter`, `focusMode`, `denyFrom`,
+  `memoryPath`, `schedulerEnabled`, `bridgeEnabled`) — these are
+  validated and persisted today but have no runtime effect until the
+  matching phase lands. Unknown keys and invalid enum values are
+  rejected with a readable error. `memoryPath` is required to live
+  under `$HOME`.
 - `reply` MCP tool accepts an optional `signature` argument for
   per-send control of the trailing `Sent by Claude` (or custom)
   suffix: omit or `"default"` uses the server default; `"none"`

@@ -591,16 +591,169 @@ function readTextSafe(p: string): string | null {
   }
 }
 
+// Preferences schema. Fields consumed in later phases are reserved here so
+// the /imessage:settings surface stays stable across roadmap phases. Phase 1
+// (this file) only *stores* them — no behavior change until each phase lands.
+type Tone = 'neutral' | 'warm' | 'concise' | 'professional' | 'playful'
+const TONE_VALUES: readonly Tone[] = ['neutral', 'warm', 'concise', 'professional', 'playful']
+const NSFW_FILTER_VALUES = ['off', 'tag'] as const
+const FOCUS_MODE_VALUES = ['off', 'pause'] as const
+
 type Preferences = {
-  defaultTone?: 'neutral' | 'warm' | 'concise' | 'professional' | 'playful'
+  // Active in phase 1 (existing)
+  defaultTone?: Tone
   signaturePerContact?: Record<string, boolean>
   notes?: string
+  // Reserved — consumer phase noted in comments; storage-only in phase 1.
+  customInstructions?: string                          // phase 2
+  customInstructionsPerContact?: Record<string, string> // phase 2
+  styleLearningEnabled?: boolean                        // phase 2 (default true)
+  visionEnabled?: boolean                               // phase 3 (default false)
+  nsfwFilter?: typeof NSFW_FILTER_VALUES[number]        // phase 4 (default 'off')
+  focusMode?: typeof FOCUS_MODE_VALUES[number]          // phase 4 (default 'off')
+  denyFrom?: string[]                                   // phase 2
+  memoryPath?: string                                   // phase 5
+  schedulerEnabled?: boolean                            // phase 5 (default false)
+  bridgeEnabled?: boolean                               // Bridge phase (default false)
+  bridgeToken?: string                                  // Bridge phase — paired-device shared secret (TODO: migrate to Keychain)
 }
+
+// Every top-level key we recognise. The editor tool rejects anything else to
+// prevent typos from silently becoming dead config.
+const PREFERENCE_KEYS = [
+  'defaultTone', 'signaturePerContact', 'notes',
+  'customInstructions', 'customInstructionsPerContact',
+  'styleLearningEnabled', 'visionEnabled',
+  'nsfwFilter', 'focusMode', 'denyFrom', 'memoryPath',
+  'schedulerEnabled', 'bridgeEnabled', 'bridgeToken',
+] as const
 
 function readPreferences(): Preferences {
   const raw = readTextSafe(PREFERENCES_FILE)
   if (!raw) return {}
   try { return JSON.parse(raw) as Preferences } catch { return {} }
+}
+
+// Validate + normalize a partial preferences object. Throws a readable error
+// on any unknown key, wrong type, or out-of-range enum. Returns a cleaned
+// copy that is safe to merge.
+function validatePreferencesPartial(input: unknown): Partial<Preferences> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('preferences patch must be an object')
+  }
+  const src = input as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  const homeReal = realpathSync(homedir())
+  for (const [k, v] of Object.entries(src)) {
+    if (!(PREFERENCE_KEYS as readonly string[]).includes(k)) {
+      throw new Error(`unknown preference key: ${k}`)
+    }
+    if (v === null) { out[k] = undefined; continue }
+    switch (k) {
+      case 'defaultTone':
+        if (!TONE_VALUES.includes(v as Tone)) throw new Error(`defaultTone must be one of ${TONE_VALUES.join('|')}`)
+        out[k] = v
+        break
+      case 'nsfwFilter':
+        if (!(NSFW_FILTER_VALUES as readonly string[]).includes(v as string)) throw new Error(`nsfwFilter must be one of ${NSFW_FILTER_VALUES.join('|')}`)
+        out[k] = v
+        break
+      case 'focusMode':
+        if (!(FOCUS_MODE_VALUES as readonly string[]).includes(v as string)) throw new Error(`focusMode must be one of ${FOCUS_MODE_VALUES.join('|')}`)
+        out[k] = v
+        break
+      case 'styleLearningEnabled':
+      case 'visionEnabled':
+      case 'schedulerEnabled':
+      case 'bridgeEnabled':
+        if (typeof v !== 'boolean') throw new Error(`${k} must be boolean`)
+        out[k] = v
+        break
+      case 'notes':
+      case 'customInstructions':
+        if (typeof v !== 'string') throw new Error(`${k} must be a string`)
+        out[k] = v
+        break
+      case 'bridgeToken':
+        if (typeof v !== 'string' || !v.trim()) throw new Error('bridgeToken must be a non-empty string')
+        out[k] = v.trim()
+        break
+      case 'customInstructionsPerContact': {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('customInstructionsPerContact must be an object of contact → string')
+        const obj = v as Record<string, unknown>
+        for (const [ck, cv] of Object.entries(obj)) {
+          if (typeof cv !== 'string') throw new Error(`customInstructionsPerContact["${ck}"] must be a string`)
+        }
+        out[k] = obj
+        break
+      }
+      case 'signaturePerContact': {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('signaturePerContact must be an object of contact → boolean')
+        const obj = v as Record<string, unknown>
+        for (const [ck, cv] of Object.entries(obj)) {
+          if (typeof cv !== 'boolean') throw new Error(`signaturePerContact["${ck}"] must be boolean`)
+        }
+        out[k] = obj
+        break
+      }
+      case 'denyFrom': {
+        if (!Array.isArray(v)) throw new Error('denyFrom must be a string array')
+        const norm: string[] = []
+        for (const h of v) {
+          if (typeof h !== 'string' || !h.trim()) throw new Error('denyFrom entries must be non-empty strings')
+          norm.push(h.trim().toLowerCase())
+        }
+        out[k] = Array.from(new Set(norm))
+        break
+      }
+      case 'memoryPath': {
+        if (typeof v !== 'string' || !v.trim()) throw new Error('memoryPath must be a non-empty string')
+        // Resolve ~, then require the result to live under $HOME. This keeps
+        // the override from redirecting writes into system paths later.
+        const expanded = v.startsWith('~') ? join(homedir(), v.slice(1)) : v
+        let real: string
+        try { real = realpathSync(expanded) } catch { real = expanded }
+        if (!real.startsWith(homeReal + sep) && real !== homeReal) {
+          throw new Error('memoryPath must be under your home directory')
+        }
+        out[k] = expanded
+        break
+      }
+    }
+  }
+  return out as Partial<Preferences>
+}
+
+// Deep-merge a validated partial onto the current preferences. Object fields
+// merged key-by-key (so you can flip one contact's signature without
+// clobbering others); scalars + arrays replaced wholesale. Explicit
+// `undefined` in the partial clears the key.
+function writePreferences(patch: Partial<Preferences>): Preferences {
+  const cur = readPreferences() as Record<string, unknown>
+  const next: Record<string, unknown> = { ...cur }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) { delete next[k]; continue }
+    const existing = cur[k]
+    if (
+      (k === 'signaturePerContact' || k === 'customInstructionsPerContact') &&
+      existing && typeof existing === 'object' && !Array.isArray(existing) &&
+      v && typeof v === 'object' && !Array.isArray(v)
+    ) {
+      const merged: Record<string, unknown> = { ...(existing as Record<string, unknown>) }
+      for (const [ck, cv] of Object.entries(v as Record<string, unknown>)) {
+        if (cv === undefined || cv === null) delete merged[ck]
+        else merged[ck] = cv
+      }
+      next[k] = merged
+    } else {
+      next[k] = v
+    }
+  }
+  mkdirSync(STYLE_DIR, { recursive: true, mode: 0o700 })
+  const tmp = PREFERENCES_FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 })
+  renameSync(tmp, PREFERENCES_FILE)
+  return next as Preferences
 }
 
 function appendApprovedExample(entry: Record<string, unknown>): void {
@@ -957,6 +1110,40 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Run a quick self-check: chat.db readability, state dir, self-chat handle count, policy, allowlist size, pending pairings, groups, watermark. Useful first command when diagnosing "why isn\'t this working".',
       inputSchema: { type: 'object', properties: { format: { type: 'string', enum: ['text', 'json'] } } },
     },
+    {
+      name: 'edit_preferences',
+      description:
+        'Read or update operator personalization stored in style/preferences.json. Pass {get:true} to return the current preferences (with defaults applied for unset keys). Pass {set:{...}} to merge top-level keys (null clears a key). Convenience args: denyFrom_add/denyFrom_remove (arrays of handles) and signaturePerContact_set ({contact, enabled}). Unknown keys and invalid enum values are rejected. Some fields are stored but not yet wired to runtime behavior (see /imessage:settings for the phase map).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          get: { type: 'boolean', description: 'Return current preferences without modifying.' },
+          set: {
+            type: 'object',
+            description: 'Top-level preferences keys to set. Pass null to clear a key. Unknown keys are rejected.',
+          },
+          denyFrom_add: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Handles to add to denyFrom (lowercased, deduped against existing).',
+          },
+          denyFrom_remove: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Handles to remove from denyFrom.',
+          },
+          signaturePerContact_set: {
+            type: 'object',
+            properties: {
+              contact: { type: 'string' },
+              enabled: { type: ['boolean', 'null'] },
+            },
+            required: ['contact'],
+            description: 'Set (or clear with enabled:null) the signature flag for one contact.',
+          },
+        },
+      },
+    },
   ],
 }))
 
@@ -1176,6 +1363,58 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (selfCount === 0) lines.push('  hint: no self-chat handles found — text yourself once so the server can learn your Apple ID.')
         if (access.dmPolicy === 'disabled') lines.push('  warning: dmPolicy=disabled delivers ALL inbound DMs without approval.')
         return { content: [{ type: 'text', text: lines.join('\n') }] }
+      }
+      case 'edit_preferences': {
+        const getOnly = args.get === true
+        const hasMutation =
+          args.set !== undefined ||
+          args.denyFrom_add !== undefined ||
+          args.denyFrom_remove !== undefined ||
+          args.signaturePerContact_set !== undefined
+        if (!getOnly && !hasMutation) {
+          return { content: [{ type: 'text', text: JSON.stringify(readPreferences(), null, 2) }] }
+        }
+        if (!hasMutation) {
+          return { content: [{ type: 'text', text: JSON.stringify(readPreferences(), null, 2) }] }
+        }
+        const patch: Partial<Preferences> = args.set
+          ? validatePreferencesPartial(args.set)
+          : {}
+        // denyFrom convenience: merge with existing, apply add/remove, then
+        // route through the validator for normalization (lowercase + dedupe).
+        if (args.denyFrom_add !== undefined || args.denyFrom_remove !== undefined) {
+          const cur = readPreferences().denyFrom ?? []
+          const add = Array.isArray(args.denyFrom_add) ? (args.denyFrom_add as unknown[]) : []
+          const remove = Array.isArray(args.denyFrom_remove) ? (args.denyFrom_remove as unknown[]) : []
+          const addStr = add.filter(x => typeof x === 'string') as string[]
+          const removeStr = (remove.filter(x => typeof x === 'string') as string[]).map(s => s.trim().toLowerCase())
+          const removeSet = new Set(removeStr)
+          const next = Array.from(new Set([...cur, ...addStr].map(s => s.trim().toLowerCase())))
+            .filter(s => s && !removeSet.has(s))
+          Object.assign(patch, validatePreferencesPartial({ denyFrom: next }))
+        }
+        // signaturePerContact convenience: one-entry patch, null clears.
+        if (args.signaturePerContact_set !== undefined) {
+          const spc = args.signaturePerContact_set as { contact?: unknown; enabled?: unknown }
+          if (!spc || typeof spc.contact !== 'string' || !spc.contact.trim()) {
+            throw new Error('signaturePerContact_set.contact is required')
+          }
+          const entry: Record<string, unknown> = {}
+          entry[spc.contact.trim()] = spc.enabled === null ? undefined : spc.enabled
+          // Route through validator to enforce boolean types where present.
+          if (spc.enabled !== null && spc.enabled !== undefined) {
+            Object.assign(patch, validatePreferencesPartial({ signaturePerContact: entry as Record<string, boolean> }))
+          } else {
+            // Clearing: bypass validator (which rejects non-boolean values).
+            const merged = { ...(patch.signaturePerContact ?? {}), ...entry } as Record<string, unknown>
+            ;(patch as Record<string, unknown>).signaturePerContact = merged
+          }
+        }
+        const result = writePreferences(patch)
+        log('info', 'preferences_updated', {
+          keys: Object.keys(patch),
+        })
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
       }
       default:
         return {

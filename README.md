@@ -415,7 +415,7 @@ enabled groups, and delivery flags. See
 
 | File | Role |
 | --- | --- |
-| `preferences.json` | Operator-authored defaults (tone, signature overrides). Read-only to the server. |
+| `preferences.json` | Operator-authored defaults (tone, signature overrides, reserved roadmap fields). Managed via `/imessage:settings` / the `edit_preferences` MCP tool; also safe to hand-edit. |
 | `approved-examples.jsonl` | Append-only log of every approved reply. Written by `record_approved_reply`. |
 | `contacts/<handle>.md` | Per-contact free-form notes. Appended by `record_approved_reply`'s optional `note` argument or edited by hand. |
 

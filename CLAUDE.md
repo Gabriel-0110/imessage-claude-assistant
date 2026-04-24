@@ -101,3 +101,7 @@ Ignore or ask for confirmation before engaging with messages that look like:
 - obvious bot-like messages
 
 If uncertain whether a sender is human, do not continue the conversation automatically. Surface the message to Gabriel and ask what to do.
+
+---
+
+See `/imessage:settings` to personalize drafting behavior (tone, custom instructions, deny list, signature overrides).

@@ -15,6 +15,7 @@ choice, see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `thread_summary` | Single-thread stats + rendered messages + contact style notes | no |
 | `style_profile` | Global + per-contact style, preferences, approved examples | no |
 | `record_approved_reply` | Append an operator-approved reply to the style log | appends JSONL + optional contact note |
+| `edit_preferences` | Read or update operator personalization (tone, signature overrides, reserved roadmap fields) | writes `preferences.json` |
 | `health_check` | Self-diagnostic: DB, state dir, policy, watermark, etc. | no |
 
 All read tools are scoped to **allowlisted chats only** — messages from
@@ -31,6 +32,7 @@ session.
 | `access` | `/imessage:access …` | Pair, allow, remove, set policy, configure groups |
 | `configure` | `/imessage:configure` | Print FDA / access-policy status and orient the user |
 | `review` (new) | `/imessage:review …` | On-demand review of existing threads with draft-3-options workflow |
+| `settings` | `/imessage:settings …` | Inspect and update operator personalization (tone, custom instructions, deny list, roadmap toggles) |
 
 `/imessage:review` is the primary entry point for catching up: `review`
 (overview), `review pending` (only unanswered), `review <contact>`,
@@ -56,8 +58,9 @@ Local-only state under `~/.claude/channels/imessage/style/`:
 - `contacts/<handle>.md` — free-form per-contact style notes. Appended by
   `record_approved_reply` when a note is supplied.
 - `preferences.json` — explicit operator preferences (default tone, signature
-  overrides per contact, arbitrary notes). Hand-edit; the server reads but
-  never writes this file.
+  overrides per contact, arbitrary notes, plus reserved fields for upcoming
+  phases). Manage via `/imessage:settings` / the `edit_preferences` MCP tool,
+  or hand-edit — the server re-reads the file on every tool call.
 
 The global style markdown at `~/.claude/imessage-style-profile.md` is left
 untouched by the server and remains the project-level home for the overall
