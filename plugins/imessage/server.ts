@@ -26,7 +26,7 @@ import { z } from 'zod'
 import { Database } from 'bun:sqlite'
 import { spawnSync } from 'child_process'
 import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, fstatSync, renameSync, realpathSync } from 'fs'
 import { homedir } from 'os'
 import { join, basename, sep } from 'path'
 
@@ -2191,8 +2191,14 @@ function shutdown(): void {
   try { db.close() } catch {}
   process.exit(0)
 }
-process.stdin.on('end', shutdown)
-process.stdin.on('close', shutdown)
+// Only listen for stdin EOF when stdin is an actual pipe (i.e. spawned by
+// Claude Code). When launchd spawns this process standalone, stdin is
+// /dev/null (a character device) and closes immediately — we must not exit.
+const stdinStat = fstatSync(0)
+if (!stdinStat.isCharacterDevice()) {
+  process.stdin.on('end', shutdown)
+  process.stdin.on('close', shutdown)
+}
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 

@@ -514,7 +514,7 @@ A LaunchAgent plist declares a user-scoped process that launchd supervises. The 
 ([macos/com.gabriel.imessage-claude.plist](macos/com.gabriel.imessage-claude.plist))
 runs **bun directly** — no shell wrapper or Claude Code process:
 
-```
+```text
 launchd → bun run --cwd <repo>/plugins/imessage start
             ↳ polls chat.db every 1 s
             ↳ HTTP bridge on :7842 (when IMESSAGE_BRIDGE_ENABLED=1)
