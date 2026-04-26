@@ -8,7 +8,7 @@ Use the official iMessage plugin (SMS/RCS/iMessage) to read incoming messages on
 
 For every new incoming iMessage:
 
-1. Read the incoming message and recent context if available.
+1. Read the incoming message and recent context if available. If the channel notification tag contains an `image_path` attribute, immediately call the Read tool on that file path to view the image before drafting replies.
 2. Generate exactly 3 distinct reply options:
    - Option 1: safest / neutral
    - Option 2: warm / natural
